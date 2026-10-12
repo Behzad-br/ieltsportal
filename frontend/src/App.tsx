@@ -3,10 +3,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Link, Redirect, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
-import { Archive, ArrowLeft, ArrowUpRight, BarChart3, BookOpen, BrainCircuit, BriefcaseBusiness, CalendarDays, Check, CheckCircle2, CheckCheck, ChevronDown, ClipboardCheck, Clock3, Eye, EyeOff, FileText, GraduationCap, Headphones, Image, Info, LayoutGrid, Library, LockKeyhole, LogOut, MapPin, Menu, Monitor, MoreHorizontal, NotebookPen, Paperclip, PencilLine, Plus, Save, Send, Settings, ShieldCheck, Sparkles, Target, Trash2, Users, X } from 'lucide-react';
+import { Archive, ArrowLeft, ArrowUpRight, BarChart3, BookOpen, BrainCircuit, BriefcaseBusiness, Calculator, CalendarDays, Check, CheckCircle2, CheckCheck, ChevronDown, ClipboardCheck, Clock3, Eye, EyeOff, FileText, GraduationCap, Headphones, Image, Info, LayoutGrid, Library, LockKeyhole, LogOut, MapPin, Menu, Monitor, MoreHorizontal, NotebookPen, Paperclip, PencilLine, Plus, Save, Send, Settings, ShieldCheck, Sparkles, Target, Trash2, Users, X } from 'lucide-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Avatar, Badge, Button, Countdown, Crumb, EmptyState, ProgressBar, SearchInput, SectionTitle, StatCard, StatusBadge, Toast } from '@/components/ui-kit';
 import { apiLogin, clearAuthSession, getAccessToken } from '@/lib/auth-api';
+import { DEMO_MODE, enterDemoRole, randomPerson, seedDemoWorld } from '@/lib/demo-mode';
 import { hydrateOrgFromBackend } from '@/lib/hydrate-org';
 import { assignments, branchPhoto, getCurrentBranchAdmin, getCurrentBranchAdminUser, getCurrentStudent, getCurrentSuperAdmin, getCurrentTeacher, getDraft, getPublishedReview, getReviewDraft, getRole, getStudentAccount, getWritingDraft, getWritingSession, listBranches, listStudentAccounts, listTeacherRoster, publishReview, reviewEssay, saveDraft, saveMockEntity, saveReviewDraft, saveWritingDraft, setCurrentBranchAdmin, setCurrentStudent, setCurrentTeacher, setPublishedReview, setRole, startWritingSession, student, students, subscribeSuperAdminSession, subscribeTeacherSession, submitHomework, submitPractice, updateCurrentSuperAdminAccount, updateStudentAccount, type Assignment, type AssignmentStatus, type ReviewDraft, type Role } from '@/lib/mock-api';
 import HomeworkComposer from '@/teacher/HomeworkComposer';
@@ -20,12 +21,16 @@ import IeltsTestsHub from '@/student/IeltsTestsHub';
 import { studentHomework } from '@/lib/homework-api';
 import AuthHero from '@/components/AuthHero';
 import { Logo } from '@/components/brand';
+import IeltsCalculator from '@/components/IeltsCalculator';
 import TeacherStudentsList from '@/teacher/TeacherStudentsList';
 import TeacherNotes from '@/teacher/TeacherNotes';
+import TeacherAttendance from '@/teacher/TeacherAttendance';
 import TeacherSettings from '@/teacher/TeacherSettings';
 import SuperAdminSettings from '@/admin/SuperAdminSettings';
 import StudentNotes from '@/student/StudentNotes';
 import StudentNoteReader from '@/student/StudentNoteReader';
+import StudentAttendance from '@/student/StudentAttendance';
+import BranchAttendance from '@/branch-admin/BranchAttendance';
 import NotificationBell from '@/components/NotificationBell';
 import UpcomingMockCard from '@/student/mocks/UpcomingMockCard';
 import MockExamsHub from '@/student/mocks/MockExamsHub';
@@ -53,8 +58,10 @@ const navByRole: Record<Role, { label:string; href:string; icon:ReactNode; child
   student: [
     overviewNav('/student/dashboard'),
     {label:'Homework',href:'/student/homework',icon:<ClipboardCheck size={17}/>},
+    {label:'Attendance',href:'/student/attendance',icon:<CalendarDays size={17}/>},
     {label:'Notes',href:'/student/notes',icon:<NotebookPen size={17}/>},
     {label:'IELTS Practice',href:'/student/practice',icon:<PencilLine size={17}/>},
+    {label:'Band calculator',href:'/student/calculator',icon:<Calculator size={17}/>},
     {label:'Results',href:'/student/results',icon:<BarChart3 size={17}/>},
     {label:'History',href:'/student/history',icon:<Archive size={17}/>},
     {label:'Mock Tests',href:'/student/mocks',icon:<Monitor size={17}/>},
@@ -63,9 +70,11 @@ const navByRole: Record<Role, { label:string; href:string; icon:ReactNode; child
     overviewNav('/teacher/dashboard'),
     {label:'Batches',href:'/teacher/batches',icon:<Users size={17}/>},
     {label:'Students',href:'/teacher/students',icon:<GraduationCap size={17}/>},
+    {label:'Attendance',href:'/teacher/attendance',icon:<CalendarDays size={17}/>},
     {label:'Homework',href:'/teacher/homework',icon:<ClipboardCheck size={17}/>},
     {label:'Reviews',href:'/teacher/reviews',icon:<FileText size={17}/>},
     {label:'Notes',href:'/teacher/notes',icon:<NotebookPen size={17}/>},
+    {label:'Band calculator',href:'/teacher/calculator',icon:<Calculator size={17}/>},
     {
       label:'Mock Exams',
       href:'/teacher/mocks',
@@ -74,7 +83,6 @@ const navByRole: Record<Role, { label:string; href:string; icon:ReactNode; child
         {label:'Library', href:'/teacher/mocks'},
         {label:'Assign mock', href:'/teacher/mocks/assign'},
         {label:'Assigned', href:'/teacher/mocks/assigned'},
-        {label:'Live monitoring', href:'/teacher/mocks/live'},
         {label:'Results', href:'/teacher/mocks/results'},
       ],
     },
@@ -92,6 +100,7 @@ const navByRole: Record<Role, { label:string; href:string; icon:ReactNode; child
     {label:'Teachers',href:'/branch-admin/teachers',icon:<BriefcaseBusiness size={17}/>},
     {label:'Students',href:'/branch-admin/students',icon:<GraduationCap size={17}/>},
     {label:'Batches',href:'/branch-admin/batches',icon:<Users size={17}/>},
+    {label:'Attendance',href:'/branch-admin/attendance',icon:<CalendarDays size={17}/>},
     {label:'Reports',href:'/branch-admin/reports',icon:<Target size={17}/>},
   ],
 };
@@ -189,6 +198,9 @@ function Shell({ role, children }: {role:Role; children:ReactNode}) {
 
 function BranchSelection() {
   const [, setLocation] = useLocation();
+  useEffect(() => {
+    if (DEMO_MODE) seedDemoWorld();
+  }, []);
   const branches = listBranches();
 
   return (
@@ -210,13 +222,37 @@ function BranchSelection() {
             <h2 className="font-display text-[1.45rem] font-bold tracking-tight text-slate-900 sm:text-[2.15rem]">
               Choose your campus.
             </h2>
+            {DEMO_MODE && (
+              <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
+                DEMO MODE ON — login bypassed. Use quick enter below (temporary).
+              </p>
+            )}
           </div>
+          {DEMO_MODE && (
+            <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {([
+                ['admin', 'Super Admin'],
+                ['branch-admin', 'Branch Admin'],
+                ['teacher', 'Teacher'],
+                ['student', 'Student'],
+              ] as const).map(([role, label]) => (
+                <button
+                  key={role}
+                  type="button"
+                  onClick={() => setLocation(enterDemoRole(role))}
+                  className="rounded-xl border border-amber-300 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 shadow-sm hover:bg-amber-50"
+                >
+                  Enter as {label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="grid min-w-0 grid-cols-2 content-start gap-2.5 sm:gap-3 lg:min-h-0 lg:flex-1 lg:grid-rows-3 lg:content-stretch lg:gap-3.5">
             {branches.map((branch, index) => (
               <button
                 key={branch.id}
                 type="button"
-                onClick={() => setLocation('/login')}
+                onClick={() => setLocation(DEMO_MODE ? enterDemoRole('student') : '/login')}
                 style={{ animationDelay: `${index * 55}ms` }}
                 className="campus-card group flex min-h-[7.5rem] min-w-0 flex-col overflow-hidden rounded-[18px] border border-white/80 bg-white text-left shadow-[0_10px_30px_rgba(40,28,12,.06)] transition duration-300 hover:border-amber-300 hover:shadow-[0_18px_40px_rgba(196,92,18,.14)] sm:min-h-0 sm:rounded-[22px] lg:h-full lg:min-h-0 lg:hover:-translate-y-1"
               >
@@ -243,12 +279,12 @@ function BranchSelection() {
           <div className="mt-3 shrink-0 fade-up-2 sm:mt-4">
             <button
               type="button"
-              onClick={() => setLocation('/super-admin-login')}
+              onClick={() => setLocation(DEMO_MODE ? enterDemoRole('admin') : '/super-admin-login')}
               className="group flex min-h-14 w-full min-w-0 items-center justify-between gap-3 rounded-[18px] bg-[linear-gradient(135deg,#171410_0%,#2a2218_58%,#3a2a12_100%)] p-3.5 text-left text-white shadow-[0_16px_40px_rgba(23,16,10,.22)] transition hover:brightness-110 sm:min-h-16 sm:rounded-[22px] sm:p-4"
             >
               <div className="min-w-0">
                 <span className="block text-sm font-semibold">Super Admin Login</span>
-                <span className="mt-0.5 block text-xs text-white/55">Network-wide control for all branches</span>
+                <span className="mt-0.5 block text-xs text-white/55">{DEMO_MODE ? 'Demo: enter without password' : 'Network-wide control for all branches'}</span>
               </div>
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-400/15 text-amber-300 transition group-hover:bg-amber-400 group-hover:text-slate-950">
                 <ShieldCheck size={18} />
@@ -263,13 +299,18 @@ function BranchSelection() {
 
 function SuperAdminLogin() {
   const [, setLocation] = useLocation();
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const demo = DEMO_MODE ? randomPerson() : null;
+  const [username, setUsername] = useState(DEMO_MODE ? 'super.admin' : '');
+  const [password, setPassword] = useState(DEMO_MODE ? (demo?.password || 'DemoSuper1!') : '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (DEMO_MODE) {
+      setLocation(enterDemoRole('admin'));
+      return;
+    }
     if (!username || password.length < 6) {
       setError('Enter a valid username and a password of at least 6 characters.');
       return;
@@ -334,12 +375,17 @@ function SuperAdminLogin() {
 
 function BranchAdminLogin() {
   const [, setLocation] = useLocation();
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const demo = DEMO_MODE ? randomPerson() : null;
+  const [username, setUsername] = useState(DEMO_MODE ? 'nadia.admin' : '');
+  const [password, setPassword] = useState(DEMO_MODE ? (demo?.password || 'DemoAdmin1!') : '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (DEMO_MODE) {
+      setLocation(enterDemoRole('branch-admin'));
+      return;
+    }
     if (!username || password.length < 6) {
       setError('Enter a valid username and a password of at least 6 characters.');
       return;
@@ -405,14 +451,19 @@ function BranchAdminLogin() {
 function Login() {
   const [, setLocation] = useLocation();
   const [role, setLoginRole] = useState<Role>('student');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const demoStudent = DEMO_MODE ? randomPerson() : null;
+  const [email, setEmail] = useState(DEMO_MODE ? (demoStudent?.email || 'ali.ahmad@example.com') : '');
+  const [password, setPassword] = useState(DEMO_MODE ? (demoStudent?.password || 'DemoStudent1!') : '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const roles: {id:Role | 'branch-admin-link'; label:string; desc:string; initials:string}[] = [{id:'student',label:'Student',desc:'Practice, submit, improve',initials:'ST'},{id:'teacher',label:'Teacher',desc:'Review and guide learners',initials:'TR'},{id:'branch-admin-link',label:'Branch Admin',desc:'Manage your branch',initials:'BA'}];
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (role === 'branch-admin-link' as Role) return;
+    if (DEMO_MODE) {
+      setLocation(enterDemoRole(role === 'teacher' ? 'teacher' : 'student'));
+      return;
+    }
     if (password.length < 6) { setError('Enter a password of at least 6 characters.'); return; }
     setError('');
     setLoading(true);
@@ -727,7 +778,7 @@ function NotFound(){ return <div className="flex min-h-[70dvh] flex-col items-ce
 function RoutedErrorBoundary({children}:{children:ReactNode}){const [location]=useLocation();return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;}
 function AppRouter(){ const [location]=useLocation();
   const isPublic = location==='/' || location==='/login' || location==='/super-admin-login' || location==='/branch-admin-login';
-  if (!isPublic && !getAccessToken()) {
+  if (!DEMO_MODE && !isPublic && !getAccessToken()) {
     if (location.startsWith('/admin')) return <Redirect href="/super-admin-login" />;
     if (location.startsWith('/branch-admin')) return <Redirect href="/branch-admin-login" />;
     return <Redirect href="/login" />;
@@ -746,6 +797,8 @@ function AppRouter(){ const [location]=useLocation();
   else if(location.startsWith('/student/homework/') && location !== '/student/homework/08/write') content=<HomeworkDo assignmentId={decodeURIComponent(location.split('/')[3])} mode="detail"/>;
   else if(location==='/student/homework/08/write')content=<Writer/>; 
   else if(location==='/student/practice')content=<PracticePage/>; 
+  else if(location==='/student/attendance')content=<StudentAttendance />;
+  else if(location==='/student/calculator')content=<IeltsCalculator eyebrow="Student tools" />;
   else if(/^\/student\/practice\/(reading|listening|writing|speaking)$/.test(location)) content=<PracticePage skill={location.split('/').pop()} />; 
   else if(['/student/results','/student/history','/student/profile'].includes(location))content=<StudentSupporting page={page||'results'}/>; 
   else if(location==='/student/mocks' || ['/student/mocks/available','/student/mocks/in-progress','/student/mocks/completed','/student/mocks/results'].includes(location)) content=<MockExamsHub tab={(location.split('/')[3] || 'upcoming').replace('-', '_')} />;
@@ -753,9 +806,11 @@ function AppRouter(){ const [location]=useLocation();
   else if(location.startsWith('/student/mock-attempt/')) content=<MockRoom attemptId={decodeURIComponent((location.split('/')[3] || '').split('?')[0])} />;
   else if(location==='/teacher/dashboard')content=<TeacherDashboard/>; 
   else if(location==='/teacher/settings')content=<TeacherSettings/>; 
+  else if(location==='/teacher/calculator')content=<IeltsCalculator eyebrow="Teacher tools" />;
   else if(location==='/teacher/homework/new')content=<TeacherCreateHomeworkPage/>;
   else if(location==='/teacher/students/new')content=<TeacherAddStudentPage />;
   else if(location==='/teacher/notes')content=<TeacherNotes />;
+  else if(location==='/teacher/attendance')content=<TeacherAttendance />;
   else if(location==='/teacher/mocks' || location==='/teacher/mocks/library')content=<MockLibraryPage/>;
   else if(location==='/teacher/mocks/assign')content=<AssignMock/>;
   else if(location==='/teacher/mocks/assigned')content=<AssignedMocksPage/>;
@@ -786,6 +841,7 @@ function AppRouter(){ const [location]=useLocation();
   else if(['/admin/branches','/admin/branch-admins','/admin/practice-papers','/admin/teachers','/admin/students','/admin/batches','/admin/questions','/admin/reports','/admin/ai-settings','/admin/audit'].includes(location))content=<AdminTablePage page={page||'teachers'}/>; 
   else if(location==='/branch-admin/settings')content=<BranchAdminSettingsPage/>;
   else if(location==='/branch-admin/dashboard')content=<BranchAdminDashboard/>;
+  else if(location==='/branch-admin/attendance')content=<BranchAttendance />;
   else if(location==='/branch-admin/teachers/new')content=<AddTeacherPage/>;
   else if(location.startsWith('/branch-admin/teachers/')) {
     const teacherId = location.split('/').pop() || '';

@@ -13,6 +13,13 @@ from app.database import get_db
 
 _bearer = HTTPBearer(auto_error=False)
 
+# Matches frontend `demo-mode.ts` DEMO_TOKEN — local SPA without real JWT users.
+_DEMO_ACCESS_TOKEN = "demo-local-token"
+
+
+def _is_demo_bearer(creds: Optional[HTTPAuthorizationCredentials]) -> bool:
+    return bool(creds and creds.credentials == _DEMO_ACCESS_TOKEN)
+
 
 def _user_from_token(db: Session, token: str) -> User:
     try:
@@ -41,6 +48,8 @@ def get_optional_user(
 ) -> Optional[User]:
     if not creds or not creds.credentials:
         return None
+    if _is_demo_bearer(creds):
+        return None
     try:
         return _user_from_token(db, creds.credentials)
     except HTTPException:
@@ -61,11 +70,14 @@ def require_roles(*roles: str):
 def resolve_student_id(
     user: Optional[User] = Depends(get_optional_user),
     x_student_id: Optional[str] = Header(default=None, alias="X-Student-Id"),
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> str:
     if user and user.role == "student":
         return user.id
     if user and user.role in {"teacher", "branch_admin", "super_admin"} and x_student_id:
         return x_student_id.strip()
+    if _is_demo_bearer(creds):
+        return ((x_student_id or "").strip() or settings.DEFAULT_STUDENT_ID)[:64]
     if settings.AUTH_LEGACY_HEADERS:
         return ((x_student_id or "").strip() or settings.DEFAULT_STUDENT_ID)[:64]
     raise HTTPException(401, "Student authentication required.")
@@ -74,11 +86,14 @@ def resolve_student_id(
 def resolve_teacher_id(
     user: Optional[User] = Depends(get_optional_user),
     x_teacher_id: Optional[str] = Header(default=None, alias="X-Teacher-Id"),
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> str:
     if user and user.role == "teacher":
         return user.id
     if user and user.role in {"super_admin", "branch_admin"}:
         return ((x_teacher_id or user.id).strip())[:64]
+    if _is_demo_bearer(creds):
+        return ((x_teacher_id or "").strip() or "demo-teacher")[:64]
     if settings.AUTH_LEGACY_HEADERS:
         return ((x_teacher_id or "").strip() or "teacher")[:64]
     raise HTTPException(401, "Teacher authentication required.")
@@ -88,6 +103,7 @@ def resolve_student_keys(
     user: Optional[User] = Depends(get_optional_user),
     x_student_id: Optional[str] = Header(default=None, alias="X-Student-Id"),
     x_student_aliases: Optional[str] = Header(default=None, alias="X-Student-Aliases"),
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> list[str]:
     keys: list[str] = []
     if user and user.role == "student":
@@ -96,7 +112,7 @@ def resolve_student_keys(
             keys.append(user.username)
         if user.email:
             keys.append(user.email)
-    elif settings.AUTH_LEGACY_HEADERS:
+    elif _is_demo_bearer(creds) or settings.AUTH_LEGACY_HEADERS:
         sid = ((x_student_id or "").strip() or settings.DEFAULT_STUDENT_ID)[:64]
         keys.append(sid)
     if x_student_aliases:

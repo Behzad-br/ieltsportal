@@ -1,5 +1,5 @@
 import { apiBase } from "@/lib/api-base";
-import { authHeaders } from "@/lib/auth-api";
+import { studentAuthHeaders } from "@/lib/api-auth-headers";
 
 export type PracticeSource = "bank" | "ai";
 
@@ -151,7 +151,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     ...options,
     headers: {
-      ...authHeaders(),
+      ...studentAuthHeaders(),
       ...(options?.body ? { "Content-Type": "application/json" } : {}),
       ...(options?.headers as Record<string, string> | undefined),
     },
@@ -316,8 +316,8 @@ export async function openLiveSession(opts: {
   const tt = examType(opts.type);
   const full = isFullMock(opts.task);
   const source = opts.source;
-  if (source === "ai" && opts.module !== "Speaking") {
-    throw new Error("AI generate is only available for Speaking practice.");
+  if (source === "ai" && opts.module !== "Speaking" && opts.module !== "Writing") {
+    throw new Error("AI generate is only available for Speaking and Writing practice.");
   }
 
   if (opts.module === "Writing") {

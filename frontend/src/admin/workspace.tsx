@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowUpRight, BriefcaseBusiness, Check, ClipboardCheck, File
 import { Avatar, Badge, Button, ProgressBar, SearchInput, SectionTitle, StatCard, StatusBadge, Toast } from '@/components/ui-kit';
 import SuperAdminSettings from '@/admin/SuperAdminSettings';
 import { addBranch, adminTrend, assignedBatchIdsForTeacher, BRANCH_IMAGE_ACCEPT, branchPhoto, getBranch, getCurrentBranchAdmin, getCurrentBranchAdminUser, getReviewDraft, getStudentAccount, getTeacherAccount, isAdminUsernameTaken, isStudentRemoved, listAllBranchAdmins, listBranches, listCampusBatches, listMockEntities, listStudentAccounts, listTeacherAccounts, listTeacherRoster, publishReview, readBranchImageFile, removeBranch, removeStudentAccount, removeTeacherAccount, reviewEssay, saveMockEntity, saveReviewDraft, setTeacherBatchAssignments, studentWorkReport, students, updateBranch, updateCurrentBranchAdminAccount, updateStudentAccount, updateTeacherAccount, type ReviewDraft } from '@/lib/mock-api';
+import { DEMO_MODE, randomCampusName, randomPerson } from '@/lib/demo-mode';
 
 function initialsFrom(name: string) {
   return name.split(/\s+/).filter(Boolean).map((p) => p[0]).join('').slice(0, 2).toUpperCase() || 'T';
@@ -442,7 +443,13 @@ export function AdminTablePage({ page }: { page: string }) {
 }
 
 type AdminDraft = { name: string; username: string; password: string; confirm: string };
-const blankAdmin = (): AdminDraft => ({ name: '', username: '', password: '', confirm: '' });
+const blankAdmin = (): AdminDraft => {
+  if (DEMO_MODE) {
+    const p = randomPerson();
+    return { name: p.fullName, username: p.username, password: p.password, confirm: p.password };
+  }
+  return { name: '', username: '', password: '', confirm: '' };
+};
 
 function CampusImageField({
   previewSrc,
@@ -565,8 +572,8 @@ export function AddBranchPage() {
           onClear={() => { setImageUrl(''); setImageError(''); }}
           error={imageError}
         />
-        <label className="block text-sm font-semibold">Branch name<input name="name" required className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
-        <label className="block text-sm font-semibold">City<input name="city" required className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
+        <label className="block text-sm font-semibold">Branch name<input name="name" required defaultValue={DEMO_MODE ? randomCampusName() : undefined} className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
+        <label className="block text-sm font-semibold">City<input name="city" required defaultValue={DEMO_MODE ? 'Gujranwala' : undefined} className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
         <div className="border-t border-border pt-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="eyebrow">Branch admin logins</div>

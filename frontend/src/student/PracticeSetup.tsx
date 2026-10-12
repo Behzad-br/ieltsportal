@@ -97,7 +97,7 @@ export default function PracticeSetup({ initialModule = 'Reading' }: { initialMo
   }, [module, started]);
 
   const selectedItem = launchItem || bankItems.find((q) => q.id === selectedPrompt);
-  const aiAllowed = module === 'Speaking';
+  const aiAllowed = module === 'Speaking' || module === 'Writing';
   const canStart = (aiAllowed && source === 'ai') || Boolean(selectedItem);
   const seriesOptions = seriesList(bankItems);
   const galleryItems = series === 'All' ? bankItems : bankItems.filter((item) => bookSeries(item) === series);
@@ -155,19 +155,32 @@ export default function PracticeSetup({ initialModule = 'Reading' }: { initialMo
                 <Archive size={18} className={source === 'bank' ? 'text-primary' : 'text-muted-foreground'} />
                 <span>
                   <span className="block text-sm font-bold">Question bank</span>
-                  <span className="mt-1 block text-xs text-muted-foreground">Published speaking prompts from the bank.</span>
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    {module === 'Writing'
+                      ? 'Published Academic / General Training writing tasks from the bank.'
+                      : 'Published speaking prompts from the bank.'}
+                  </span>
                 </span>
               </button>
               <button
                 type="button"
-                onClick={() => setSource('ai')}
+                onClick={() => {
+                  setSource('ai');
+                  if (module === 'Writing' && isFullMock(task)) setTask('Task 2');
+                }}
                 className={`flex items-start gap-3 rounded-xl border p-4 text-left ${source === 'ai' ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/40'}`}
               >
                 <BrainCircuit size={18} className={source === 'ai' ? 'text-primary' : 'text-muted-foreground'} />
                 <span>
                   <span className="block text-sm font-bold">AI generate (random)</span>
                   <span className="mt-1 block text-xs text-muted-foreground">
-                    {isFullMock(task) ? 'AI creates a full speaking mock.' : 'AI creates a new speaking part for practice.'}
+                    {module === 'Writing'
+                      ? isFullMock(task)
+                        ? 'AI creates a full Writing mock (Task 1 + Task 2).'
+                        : 'AI creates a new random Writing topic for this task.'
+                      : isFullMock(task)
+                        ? 'AI creates a full speaking mock.'
+                        : 'AI creates a new speaking part for practice.'}
                   </span>
                 </span>
               </button>
@@ -221,7 +234,16 @@ export default function PracticeSetup({ initialModule = 'Reading' }: { initialMo
             <div className="mt-2 border-t border-border pt-6">
               {bankError && <p className="mb-3 text-sm text-red-700">{bankError}</p>}
               {bankLoading && <p className="text-sm text-muted-foreground">Loading tests…</p>}
-              {!bankLoading && !bankError && (
+              {!bankLoading && !bankError && galleryItems.length === 0 && aiAllowed && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-sm text-amber-950">
+                  <p className="font-semibold">No books in the bank for this filter yet.</p>
+                  <p className="mt-1 text-amber-900/80">Switch to <strong>AI generate (random)</strong> for a new practice topic, or pick another test type.</p>
+                  <Button className="mt-3" variant="quiet" onClick={() => { setSource('ai'); if (module === 'Writing') setTask('Task 2'); }}>
+                    Use AI random topic
+                  </Button>
+                </div>
+              )}
+              {!bankLoading && !bankError && galleryItems.length > 0 && (
                 <PracticeTestGallery
                   module={module}
                   items={galleryItems}

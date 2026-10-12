@@ -5,8 +5,8 @@ Production (Hestia / PM2):
     cd backend
     uvicorn app.main:asgi_app --host 127.0.0.1 --port ${PORT:-5000}
 
-Local:
-    uvicorn app.main:asgi_app --reload --host 127.0.0.1 --port 8001
+Local (matches frontend Vite proxy):
+    uvicorn app.main:asgi_app --reload --host 127.0.0.1 --port 5000
 """
 import logging
 from contextlib import asynccontextmanager

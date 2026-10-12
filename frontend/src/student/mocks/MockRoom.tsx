@@ -6,6 +6,7 @@ import WritingRoom from '@/practice/WritingRoom';
 import ReadingRoom from '@/practice/ReadingRoom';
 import ListeningRoom from '@/practice/ListeningRoom';
 import SpeakingRoom from '@/practice/SpeakingRoom';
+import { DEMO_MODE } from '@/lib/demo-mode';
 import { getCurrentStudent } from '@/lib/mock-api';
 import { livekitToken, mockHeartbeat, saveMockAnswers, startMockAttempt, submitMockAttempt } from '@/lib/mocks-api';
 import { emitMockEvent, joinMockAssignment, mockSocket } from '@/lib/mock-realtime';
@@ -48,6 +49,7 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
   const attemptRef = useRef(attemptId);
   const finishingRef = useRef(false);
   const sessionRef = useRef<any>(null);
+  const remainingRef = useRef<number | null>(null);
   const assignmentId = assignmentFromUrl();
 
   const attachTeacherAudio = (track: RemoteTrack) => {
@@ -98,6 +100,10 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    remainingRef.current = remaining;
+  }, [remaining]);
 
   useEffect(() => {
     if (assignmentId) sessionStorage.setItem('mock-assignment-id', assignmentId);
@@ -202,7 +208,7 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
   };
 
   const startShare = async () => {
-    if (!sessionRef.current?.screen_monitoring) return;
+    if (!sessionRef.current?.screen_monitoring || DEMO_MODE) return;
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: 8, height: 360 },
@@ -217,7 +223,7 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
   useEffect(() => {
     if (!session) return;
     const id = attemptRef.current;
-    const supervised = Boolean(session.screen_monitoring || session.fullscreen_required || session.secure_mode);
+    const supervised = !DEMO_MODE && Boolean(session.screen_monitoring || session.fullscreen_required || session.secure_mode);
     const onLeave = (e: BeforeUnloadEvent) => {
       ping('DISCONNECTED');
       e.preventDefault();
@@ -249,35 +255,55 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
       if (!document.fullscreenElement) setWarning('You left the mock test window. Please return to the test.');
     };
     document.addEventListener('fullscreenchange', onFs);
+    if (DEMO_MODE) {
+      void mockHeartbeat(id, { event_type: 'SCREEN_SHARE_STARTED', current_section: session.current_section || session.skill?.kind }).catch(() => undefined);
+    }
     const beat = setInterval(async () => {
       try {
         const answers = snapshotAnswers();
         if (answers.length) {
           await saveMockAnswers(id, { answers, client_seq: Date.now(), current_section: sessionRef.current?.current_section });
         }
-        const pulse = await mockHeartbeat(id, { event_type: 'HEARTBEAT' });
-        emitMockEvent({ attemptId: id, studentId: getCurrentStudent().id, eventType: 'HEARTBEAT' });
+        const pulse = await mockHeartbeat(id, {
+          event_type: 'HEARTBEAT',
+          current_section: sessionRef.current?.current_section || session.skill?.kind,
+          remaining_seconds: remainingRef.current ?? undefined,
+        });
         setConnected(true);
         setPaused(Boolean(pulse.paused));
-        if (typeof pulse.remaining_seconds === 'number') setRemaining(pulse.remaining_seconds);
+        if (typeof pulse.remaining_seconds === 'number' && !DEMO_MODE) setRemaining(pulse.remaining_seconds);
         if (pulse.status === 'submitted') setLocation('/student/mocks/completed');
       } catch {
         setConnected(false);
         ping('DISCONNECTED');
       }
-    }, 8000);
-    if (session.fullscreen_required && !document.fullscreenElement) {
+    }, DEMO_MODE ? 4000 : 8000);
+    if (!DEMO_MODE && session.fullscreen_required && !document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(() => setWarning('Fullscreen is required for this mock.'));
     }
     const socket = mockSocket();
     const onState = (payload: any) => {
       const type = payload?.eventType || payload?.event_type;
+      const sid = payload?.studentId || payload?.student_id;
+      if (sid && sid !== getCurrentStudent().id) return;
       if (type === 'TEACHER_VOICE_ON') setTeacherTalking(true);
       if (type === 'TEACHER_VOICE_OFF') setTeacherTalking(false);
+      if (type === 'TEACHER_PAUSE') setPaused(true);
+      if (type === 'TEACHER_RESUME') setPaused(false);
+      if (type === 'TIME_ADDED' && typeof payload?.remaining_seconds === 'number') {
+        setRemaining(payload.remaining_seconds as number);
+      }
+      if (type === 'TEACHER_MESSAGE' && payload?.message) {
+        setWarning(String(payload.message));
+      }
+      if (type === 'FORCE_SUBMIT' || type === 'TEST_SUBMITTED') {
+        setLocation('/student/mocks/completed');
+      }
     };
     socket.on('mock:state', onState);
-    if (session.screen_monitoring) void ensureLivekitRoom();
-    void startShare();
+    if (!DEMO_MODE && session.screen_monitoring) void ensureLivekitRoom();
+    if (!DEMO_MODE) void startShare();
+    else setShareBlocked(false);
     return () => {
       socket.off('mock:state', onState);
       window.removeEventListener('beforeunload', onLeave);
@@ -302,8 +328,17 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
     if (finishingRef.current) return;
     finishingRef.current = true;
     streamRef.current?.getTracks().forEach((track) => track.stop());
+    const id = attemptRef.current;
+    const answers = snapshotAnswers();
+    if (answers.length) {
+      await saveMockAnswers(id, {
+        answers,
+        client_seq: Date.now(),
+        current_section: sessionRef.current?.current_section || sessionRef.current?.skill?.kind,
+      }).catch(() => undefined);
+    }
     ping('TEST_SUBMITTED');
-    await submitMockAttempt(attemptRef.current).catch(() => undefined);
+    await submitMockAttempt(id).catch(() => undefined);
     roomRef.current?.disconnect();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
     setLocation('/student/mocks/completed');
@@ -350,7 +385,7 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
           <button type="button" className="ml-3 font-bold" onClick={() => setWarning('')}>Dismiss</button>
         </div>
       )}
-      {shareBlocked && session.screen_monitoring && (
+      {shareBlocked && session.screen_monitoring && !DEMO_MODE && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-6">
           <div className="card max-w-md p-6 text-center">
             <h2 className="font-display text-xl font-bold">Screen sharing required</h2>
@@ -365,6 +400,22 @@ export default function MockRoom({ attemptId }: { attemptId: string }) {
         {skill.kind === 'reading' && <ReadingRoom attemptId={skill.attemptId} onExit={finish} onSubmitted={finish} />}
         {skill.kind === 'listening' && <ListeningRoom attemptId={skill.attemptId} onExit={finish} />}
         {skill.kind === 'speaking' && <SpeakingRoom sessionId={skill.sessionId} onExit={finish} />}
+        {(skill.kind === 'demo-writing' || (DEMO_MODE && !['writing-question', 'writing-mock', 'reading', 'listening', 'speaking'].includes(String(skill.kind || '')))) && (
+          <div className="mx-auto max-w-3xl space-y-4 p-6">
+            <h2 className="font-display text-2xl font-bold">{session.title || 'Demo mock'}</h2>
+            <p className="text-sm text-muted-foreground">
+              Write your answer below. Your teacher can watch live status from Live monitoring.
+            </p>
+            <textarea
+              name="task_response"
+              id="task_response"
+              className="min-h-[280px] w-full rounded-xl border border-input bg-card p-4 text-sm"
+              placeholder="Type your answer…"
+              defaultValue=""
+            />
+            <Button onClick={finish}>Submit mock</Button>
+          </div>
+        )}
       </div>
     </div>
   );

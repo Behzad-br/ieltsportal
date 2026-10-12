@@ -10,14 +10,28 @@ DEPLOYMENT.md HestiaCP / Ubuntu production guide
 
 Practice scores are estimates, not official IELTS results.
 
+Full product overview (roles + features): **[PROJECT_REPORT.md](./PROJECT_REPORT.md)**
+
 ## Local development
+
+**Required local topology**
+
+```
+Frontend  http://localhost:5173
+    ↓  Vite /api proxy
+Backend   http://127.0.0.1:5000
+    ↓
+Database  SQLite (default) or test PostgreSQL / MySQL via DATABASE_URL
+```
+
+This repo does **not** use Supabase. Persistence is SQLAlchemy → SQLite (local default), MySQL (production), or PostgreSQL when `DATABASE_URL` is set.
 
 ```powershell
 .\scripts\start-all.ps1
 ```
 
-- App: http://localhost:5174  
-- API: http://127.0.0.1:8001/api/health  
+- App: http://localhost:5173  
+- API: http://127.0.0.1:5000/api/health  
 
 First-time setup:
 
@@ -28,10 +42,22 @@ npm install
 cd ..\backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt
+# Prefer full install when disk allows (includes Whisper/torch):
+#   pip install -r requirements-dev.txt
+# Core API only (no Whisper) if disk is limited:
+pip install -r requirements-core.txt
 ```
 
 Copy `.env.example` → `.env` at the repo root (or `backend/.env`) and set API keys. Never commit real secrets.
+
+Verify foundation (DB connect + read + write):
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "."
+python -m app.cli.check_foundation
+```
 
 ## Production (HestiaCP)
 

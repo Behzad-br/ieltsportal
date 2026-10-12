@@ -9,7 +9,7 @@ import {
   Evaluation,
 } from "./types";
 import { apiBase } from "@/lib/api-base";
-import { authHeaders } from "@/lib/auth-api";
+import { studentAuthHeaders } from "@/lib/api-auth-headers";
 
 async function request<T>(
   path: string,
@@ -22,7 +22,7 @@ async function request<T>(
     res = await fetch(url, {
       ...options,
       headers: {
-        ...authHeaders(),
+        ...studentAuthHeaders(),
         ...(options?.headers || {}),
       },
     });

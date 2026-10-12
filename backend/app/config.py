@@ -34,7 +34,8 @@ _PROJECT_ROOT = _resolve_project_root()
 _logger = logging.getLogger(__name__)
 
 _PROD_CORS = "https://fti4iltes.tech,https://www.fti4iltes.tech"
-_DEV_CORS = "http://127.0.0.1:5174,http://localhost:5174"
+# Local Vite default is http://localhost:5173 (see frontend/vite.config.ts).
+_DEV_CORS = "http://127.0.0.1:5173,http://localhost:5173"
 
 
 def _env_file_paths() -> tuple[str, ...]:

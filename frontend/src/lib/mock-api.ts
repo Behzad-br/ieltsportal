@@ -819,6 +819,23 @@ export async function addBranch(input: {
     }
   }
 
+  const { DEMO_MODE } = await import('@/lib/demo-mode');
+  if (DEMO_MODE) {
+    const imageUrl = (input.imageUrl || '').trim();
+    const saved: CampusBranch = {
+      id: slugBranchId(input.name),
+      name: input.name.trim(),
+      city: input.city.trim(),
+      students: 0,
+      teachers: 0,
+      avg: 0,
+      ...(imageUrl ? { imageUrl } : {}),
+      ...syncPrimary(admins),
+    };
+    writeCampusLocal(saved, 'create');
+    return saved;
+  }
+
   const { orgFetch, getAccessToken } = await import('@/lib/auth-api');
   if (!getAccessToken()) {
     throw new Error('Sign in as Super Admin before creating a branch.');
@@ -861,6 +878,19 @@ export async function updateBranch(
   });
   if (!admins.length) throw new Error('At least one branch admin is required.');
 
+  const { DEMO_MODE } = await import('@/lib/demo-mode');
+  if (DEMO_MODE) {
+    const saved = normalizeBranch({
+      ...existing,
+      name: nextName,
+      city: nextCity,
+      imageUrl: nextImage || undefined,
+      ...syncPrimary(admins),
+    });
+    writeCampusLocal(saved, 'update');
+    return saved;
+  }
+
   const { orgFetch, getAccessToken } = await import('@/lib/auth-api');
   if (!getAccessToken()) {
     throw new Error('Sign in as Super Admin before updating a branch.');
@@ -875,7 +905,6 @@ export async function updateBranch(
       admins: admins.map((a) => ({
         name: a.name.trim(),
         username: a.username.trim().toLowerCase(),
-        // Empty password means "keep existing hash" on the backend.
         password: a.password || '',
       })),
     }),
@@ -945,6 +974,22 @@ export async function updateCurrentBranchAdminAccount(patch: {
   if (nextUsername.length < 3) return null;
   if (isAdminUsernameTaken(nextUsername, { branchId: campus.id, username: current.username })) return null;
 
+  const next: BranchAdminAccount = {
+    name: (patch.name ?? current.name).trim() || current.name,
+    username: nextUsername,
+    password: (patch.password ?? current.password) || current.password,
+  };
+
+  const { DEMO_MODE } = await import('@/lib/demo-mode');
+  if (DEMO_MODE) {
+    const admins = asAdmins(campus).map((a) =>
+      a.username.toLowerCase() === current.username.toLowerCase() ? next : a
+    );
+    writeCampusLocal(normalizeBranch({ ...campus, admins, ...syncPrimary(admins) }), 'update');
+    setCurrentBranchAdmin(campus.id, next.username);
+    return next;
+  }
+
   const { orgFetch, getAccessToken, getAuthUser } = await import('@/lib/auth-api');
   if (!getAccessToken()) throw new Error('Session expired. Sign in again.');
   const me = getAuthUser();
@@ -953,8 +998,8 @@ export async function updateCurrentBranchAdminAccount(patch: {
   }
 
   const body: Record<string, string> = {
-    full_name: (patch.name ?? current.name).trim() || current.name,
-    username: nextUsername.toLowerCase(),
+    full_name: next.name,
+    username: next.username.toLowerCase(),
   };
   if (patch.password && patch.password.length >= 6) {
     body.password = patch.password;
@@ -965,13 +1010,13 @@ export async function updateCurrentBranchAdminAccount(patch: {
     body: JSON.stringify(body),
   });
 
-  const next: BranchAdminAccount = {
+  const saved: BranchAdminAccount = {
     name: body.full_name,
     username: body.username,
     password: '',
   };
   const admins = asAdmins(campus).map((a) =>
-    a.username.toLowerCase() === current.username.toLowerCase() ? next : { ...a, password: '' }
+    a.username.toLowerCase() === current.username.toLowerCase() ? saved : { ...a, password: '' }
   );
   writeCampusLocal(
     normalizeBranch({
@@ -981,8 +1026,8 @@ export async function updateCurrentBranchAdminAccount(patch: {
     }),
     'update',
   );
-  setCurrentBranchAdmin(campus.id, next.username);
-  return next;
+  setCurrentBranchAdmin(campus.id, saved.username);
+  return saved;
 }
 
 export function listAllBranchAdmins(): { branch: CampusBranch; admin: BranchAdminAccount }[] {

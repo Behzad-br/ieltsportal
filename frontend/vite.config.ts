@@ -12,24 +12,25 @@ export default defineConfig({
     dedupe: ['react', 'react-dom'],
   },
   server: {
-    port: 5174,
+    // Local contract: frontend :5173 → Vite proxy → backend :5000
+    port: 5173,
     strictPort: true,
     host: '127.0.0.1',
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8001',
+        target: 'http://127.0.0.1:5000',
         changeOrigin: true,
         timeout: 0,
       },
       '/socket.io': {
-        target: 'http://127.0.0.1:8001',
+        target: 'http://127.0.0.1:5000',
         changeOrigin: true,
         ws: true,
       },
     },
   },
   preview: {
-    port: 5174,
+    port: 5173,
     host: '127.0.0.1',
   },
 });

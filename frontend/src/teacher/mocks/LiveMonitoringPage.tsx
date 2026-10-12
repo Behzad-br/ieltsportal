@@ -3,6 +3,7 @@ import { useLocation } from 'wouter';
 import { Room, RoomEvent, Track, type RemoteTrack } from 'livekit-client';
 import { Mic, MicOff } from 'lucide-react';
 import { Button, SectionTitle, StatusBadge, Toast } from '@/components/ui-kit';
+import { DEMO_MODE } from '@/lib/demo-mode';
 import {
   livekitToken,
   listTeacherMocks,
@@ -49,11 +50,15 @@ export function LiveMonitoringPage({ assignmentId }: { assignmentId?: string }) 
   const roomRef = useRef<Room | null>(null);
 
   useEffect(() => {
+    if (assignmentId) setCurrent(assignmentId);
+  }, [assignmentId]);
+
+  useEffect(() => {
     listTeacherMocks().then((d) => {
       setAssignments(d.assignments);
-      if (!current && d.assignments[0]) setCurrent(d.assignments[0].id);
+      setCurrent((prev) => prev || assignmentId || d.assignments[0]?.id || '');
     }).catch(() => setAssignments([]));
-  }, []);
+  }, [assignmentId]);
 
   const load = () => {
     if (!current) return;
@@ -99,7 +104,10 @@ export function LiveMonitoringPage({ assignmentId }: { assignmentId?: string }) 
   }, [current]);
 
   useEffect(() => {
-    if (!current) return;
+    if (!current || DEMO_MODE) {
+      setLivekitOn(false);
+      return;
+    }
     let cancelled = false;
     setMicLive(false);
     livekitToken(current, 'teacher')
@@ -151,6 +159,20 @@ export function LiveMonitoringPage({ assignmentId }: { assignmentId?: string }) 
   }, [current]);
 
   const toggleLiveTalk = async () => {
+    if (DEMO_MODE) {
+      const next = !micLive;
+      setMicLive(next);
+      if (current) {
+        emitTeacherVoice({
+          assignmentId: current,
+          active: next,
+          studentId: selected?.student_id,
+          attemptId: selected?.attempt_id || undefined,
+        });
+      }
+      setToast(next ? 'Demo live talk on — student sees the speaking banner' : 'Demo live talk off');
+      return;
+    }
     const room = roomRef.current;
     if (!room || !livekitOn) {
       setToast('LiveKit is not connected yet. Start LiveKit and open this page again.');
@@ -166,7 +188,7 @@ export function LiveMonitoringPage({ assignmentId }: { assignmentId?: string }) 
           assignmentId: current,
           active: next,
           studentId: selected?.student_id,
-          attemptId: selected?.attempt_id,
+          attemptId: selected?.attempt_id || undefined,
         });
       }
       setToast(next ? 'Live talk on — students in this mock can hear you' : 'Live talk off');
@@ -187,22 +209,33 @@ export function LiveMonitoringPage({ assignmentId }: { assignmentId?: string }) 
 
   return (
     <>
-      <SectionTitle eyebrow="Mock exams" title="Live monitoring" description="LiveKit carries student screens and teacher live talk. Question, timer and warnings travel separately so a frozen preview still shows the real test state." />
+      <SectionTitle
+        eyebrow="Mock exams"
+        title="Live monitoring"
+        description={
+          DEMO_MODE
+            ? 'Demo mode: open a student mock in another tab to watch status, timer, warnings, and teacher actions update live. Screen video needs LiveKit in production.'
+            : 'LiveKit carries student screens and teacher live talk. Question, timer and warnings travel separately so a frozen preview still shows the real test state.'
+        }
+      />
       <div className="mb-4 flex flex-wrap gap-3">
         <select className="h-10 rounded-lg border border-input bg-card px-3 text-sm" value={current} onChange={(e) => { setCurrent(e.target.value); setLocation(`/teacher/mocks/live/${e.target.value}`); }}>
           {assignments.map((a) => <option key={a.id} value={a.id}>{a.title} · {a.batch_label || 'Selected'}</option>)}
         </select>
-        <StatusBadge status={livekitOn ? 'Screens live' : 'Status only'} />
+        <StatusBadge status={livekitOn ? 'Screens live' : DEMO_MODE ? 'Demo live status' : 'Status only'} />
         {micLive && <StatusBadge status="Live talk on" />}
         <Button
           variant={micLive ? 'primary' : 'quiet'}
-          disabled={micBusy || !livekitOn}
+          disabled={micBusy || (!livekitOn && !DEMO_MODE)}
           onClick={() => void toggleLiveTalk()}
         >
           {micLive ? <Mic size={16} /> : <MicOff size={16} />}
           {micBusy ? 'Mic…' : micLive ? 'Live talk on' : 'Live talk'}
         </Button>
       </div>
+      {!assignments.length && (
+        <p className="mb-4 text-sm text-muted-foreground">No assigned mocks yet. Assign a mock first, then open Live monitoring.</p>
+      )}
       {alerts.length > 0 && (
         <div className="mb-4 space-y-2">
           {alerts.slice(0, 3).map((alert) => (
@@ -238,7 +271,19 @@ export function LiveMonitoringPage({ assignmentId }: { assignmentId?: string }) 
               <div className="mt-2 overflow-hidden rounded-lg bg-slate-900">
                 {track ? <LiveVideo track={track} className="aspect-video h-auto w-full object-cover" /> : (
                   <div className="flex aspect-video items-center justify-center px-3 text-center text-xs text-white/70">
-                    {s.status === 'disconnected' ? `Disconnected · last seen ${s.last_seen_at ? new Date(s.last_seen_at).toLocaleTimeString() : '—'}` : s.screen_sharing ? 'Connecting screen…' : 'Waiting for screen share'}
+                    {DEMO_MODE
+                      ? s.status === 'in_progress'
+                        ? `Live status · ${clock(s.remaining_seconds)} · ${s.warning_count || 0} warnings`
+                        : s.status === 'submitted'
+                          ? 'Submitted'
+                          : s.status === 'disconnected'
+                            ? 'Disconnected'
+                            : 'Waiting for student to start'
+                      : s.status === 'disconnected'
+                        ? `Disconnected · last seen ${s.last_seen_at ? new Date(s.last_seen_at).toLocaleTimeString() : '—'}`
+                        : s.screen_sharing
+                          ? 'Connecting screen…'
+                          : 'Waiting for screen share'}
                   </div>
                 )}
               </div>
@@ -280,7 +325,7 @@ export function LiveMonitoringPage({ assignmentId }: { assignmentId?: string }) 
             <div className="mt-4 flex flex-wrap gap-2">
               <Button
                 variant={micLive ? 'primary' : 'quiet'}
-                disabled={micBusy || !livekitOn}
+                disabled={micBusy || (!livekitOn && !DEMO_MODE)}
                 onClick={() => void toggleLiveTalk()}
               >
                 {micLive ? <Mic size={16} /> : <MicOff size={16} />}

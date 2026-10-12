@@ -396,15 +396,18 @@ async def generate_question(
     db: Session = Depends(get_db),
     student_id: str = Depends(get_student_id),
 ):
-    raise HTTPException(400, "AI generate is only available for Speaking.")
     surprise = bool(body.get("surprise"))
-    test_type = body.get("test_type") or ("academic" if not surprise else "academic")
+    test_type = body.get("test_type") or "academic"
     task_number = int(body.get("task_number") or (2 if surprise else 1))
     if surprise:
         import random
 
         test_type = random.choice(["academic", "general_training"])
         task_number = random.choice([1, 2])
+    if test_type not in {"academic", "general_training"}:
+        raise HTTPException(400, "test_type must be academic or general_training.")
+    if task_number not in {1, 2}:
+        raise HTTPException(400, "task_number must be 1 or 2.")
     try:
         payload = await writing_ai.generate_question_payload(
             db,

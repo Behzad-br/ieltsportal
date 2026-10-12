@@ -10,6 +10,7 @@ import {
   type BankItem,
 } from '@/lib/practice-engine';
 import {
+  getMockAttemptWork,
   listMockStudents,
   listTeacherMocks,
   reviewMockAttempt,
@@ -223,27 +224,182 @@ export function MockLibraryPage() {
 export function AssignedMocksPage() {
   const [, setLocation] = useLocation();
   const [rows, setRows] = useState<MockAssignment[]>([]);
-  useEffect(() => { listTeacherMocks().then((d) => setRows(d.assignments)).catch(() => setRows([])); }, []);
-  if (!rows.length) return <><SectionTitle eyebrow="Mock exams" title="Assigned mocks" /><EmptyState title="No mocks assigned yet" text="Assign a library mock to a batch or selected students." action={<Button onClick={() => setLocation('/teacher/mocks/assign')}>Assign mock</Button>} /></>;
+  const [openId, setOpenId] = useState('');
+  const [students, setStudents] = useState<MockStudentRow[]>([]);
+  const [work, setWork] = useState<Awaited<ReturnType<typeof getMockAttemptWork>> | null>(null);
+  const [workError, setWorkError] = useState('');
+  const [loadingWork, setLoadingWork] = useState(false);
+
+  const reload = () => {
+    listTeacherMocks()
+      .then((d) => {
+        setRows(d.assignments || []);
+        if (!openId && d.assignments?.[0]) setOpenId(d.assignments[0].id);
+      })
+      .catch(() => setRows([]));
+  };
+
+  useEffect(() => { reload(); }, []);
+
+  useEffect(() => {
+    if (!openId) {
+      setStudents([]);
+      return;
+    }
+    listMockStudents(openId)
+      .then((d) => setStudents(d.students || []))
+      .catch(() => setStudents([]));
+  }, [openId]);
+
+  const openWork = async (attemptId?: string | null) => {
+    if (!attemptId) return;
+    setLoadingWork(true);
+    setWorkError('');
+    try {
+      setWork(await getMockAttemptWork(attemptId));
+    } catch (e: any) {
+      setWork(null);
+      setWorkError(e?.message || 'Could not load student work.');
+    } finally {
+      setLoadingWork(false);
+    }
+  };
+
+  if (!rows.length) {
+    return (
+      <>
+        <SectionTitle eyebrow="Mock exams" title="Assigned mocks" />
+        <EmptyState
+          title="No mocks assigned yet"
+          text="Assign a library mock to a batch or selected students."
+          action={<Button onClick={() => setLocation('/teacher/mocks/assign')}>Assign mock</Button>}
+        />
+      </>
+    );
+  }
+
+  const active = rows.find((r) => r.id === openId) || rows[0];
+
   return (
     <>
-      <SectionTitle eyebrow="Mock exams" title="Assigned mocks" action={<Button onClick={() => setLocation('/teacher/mocks/assign')}>Assign mock</Button>} />
-      <div className="grid gap-4 md:grid-cols-2">
-        {rows.map((row) => (
-          <div key={row.id} className="card p-5">
-            <div className="flex items-start justify-between gap-2">
-              <Badge tone="amber">{row.mock_type}</Badge>
-              <StatusBadge status={`${row.submitted || 0}/${row.assigned || 0} submitted`} />
-            </div>
-            <h2 className="mt-3 font-display text-lg font-bold">{row.title}</h2>
-            <p className="mt-2 text-xs text-muted-foreground">{row.batch_label || 'Selected students'} · {formatTime(row.available_at)}</p>
-            <div className="mt-4 flex gap-2">
-              <Button variant="quiet" onClick={() => setLocation(`/teacher/mocks/live/${row.id}`)}>Live</Button>
-              <Button variant="quiet" onClick={() => setLocation(`/teacher/mocks/results/${row.id}`)}>Results</Button>
-            </div>
-          </div>
-        ))}
+      <SectionTitle
+        eyebrow="Mock exams"
+        title="Assigned mocks"
+        description="Every assigned mock appears here. Open a student to see their draft or full submitted work."
+        action={<Button onClick={() => setLocation('/teacher/mocks/assign')}>Assign mock</Button>}
+      />
+      <div className="grid gap-6 lg:grid-cols-[.9fr_1.1fr]">
+        <div className="space-y-3">
+          {rows.map((row) => {
+            const selected = (active?.id || openId) === row.id;
+            return (
+              <button
+                key={row.id}
+                type="button"
+                onClick={() => { setOpenId(row.id); setWork(null); }}
+                className={`card w-full p-5 text-left transition ${selected ? 'border-primary ring-1 ring-primary/30' : 'hover:border-primary/40'}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <Badge tone="amber">{row.mock_type}</Badge>
+                  <StatusBadge status={`${row.submitted || 0}/${row.assigned || 0} submitted`} />
+                </div>
+                <h2 className="mt-3 font-display text-lg font-bold">{row.title}</h2>
+                <p className="mt-2 text-xs text-muted-foreground">{row.batch_label || 'Selected students'} · {formatTime(row.available_at)}</p>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="card p-5">
+          {active ? (
+            <>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="eyebrow">Assignment detail</div>
+                  <h2 className="mt-1 font-display text-xl font-bold">{active.title}</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {active.batch_label || 'Selected students'} · {active.assigned || 0} students · {active.submitted || 0} solved
+                  </p>
+                </div>
+                <Button variant="quiet" onClick={() => setLocation(`/teacher/mocks/results/${active.id}`)}>Open results</Button>
+              </div>
+
+              <div className="mt-5 space-y-2">
+                {students.map((s) => {
+                  const solved = s.status === 'submitted' || s.status === 'completed';
+                  const busy = s.status === 'in_progress';
+                  return (
+                    <div key={s.id} className="rounded-xl border border-border px-4 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-semibold">{s.student_name}</div>
+                          <p className="text-xs text-muted-foreground">
+                            {solved ? 'Solved / submitted' : busy ? 'In progress' : 'Not started'}
+                            {typeof s.writing_band === 'number' ? ` · Writing ${s.writing_band}` : ''}
+                            {typeof s.overall_band === 'number' ? ` · Overall ${s.overall_band}` : ''}
+                            {s.warning_count ? ` · ${s.warning_count} warnings` : ''}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <StatusBadge status={solved ? 'Submitted' : busy ? 'In progress' : 'Assigned'} />
+                          {(solved || busy) && s.attempt_id && (
+                            <Button variant="quiet" onClick={() => void openWork(s.attempt_id)}>
+                              {solved ? 'View work' : 'View draft'}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {!students.length && (
+                  <p className="text-sm text-muted-foreground">No students on this assignment yet.</p>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">Select an assignment.</p>
+          )}
+        </div>
       </div>
+
+      {(work || loadingWork || workError) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+          <div className="card max-h-[90dvh] w-full max-w-3xl overflow-y-auto p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="eyebrow">Student work</div>
+                <h2 className="mt-1 font-display text-xl font-bold">{work?.student_name || 'Loading…'}</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {work ? `${work.status.replace('_', ' ')}${work.submitted_at ? ` · ${new Date(work.submitted_at).toLocaleString()}` : ''}` : ''}
+                </p>
+              </div>
+              <button type="button" className="text-sm font-semibold text-muted-foreground" onClick={() => { setWork(null); setWorkError(''); }}>Close</button>
+            </div>
+            {loadingWork && <p className="mt-4 text-sm text-muted-foreground">Loading answers…</p>}
+            {workError && <p className="mt-4 text-sm text-red-700">{workError}</p>}
+            {work && (
+              <div className="mt-4 space-y-4">
+                {(work.writing_band != null || work.overall_band != null || work.published) && (
+                  <div className="rounded-xl bg-muted/50 px-4 py-3 text-sm">
+                    {work.writing_band != null && <div>Writing band: <strong>{work.writing_band}</strong></div>}
+                    {work.overall_band != null && <div>Overall: <strong>{work.overall_band}</strong></div>}
+                    {work.writing_feedback && <p className="mt-2 text-muted-foreground">{work.writing_feedback}</p>}
+                  </div>
+                )}
+                {work.answers.length ? work.answers.map((row) => (
+                  <div key={row.question_key} className="rounded-xl border border-border p-4">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{row.question_key.replaceAll('_', ' ')}</div>
+                    <pre className="mt-2 whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground">{String(row.value ?? '')}</pre>
+                  </div>
+                )) : (
+                  <p className="text-sm text-muted-foreground">No answers saved yet for this attempt.</p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </>
   );
 }
