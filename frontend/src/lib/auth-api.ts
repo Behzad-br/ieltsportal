@@ -1,6 +1,14 @@
 /** Production auth session + API helpers. */
 
 import { apiBase } from '@/lib/api-base';
+import {
+  AuthSessionError,
+  formatApiDetail,
+  messageFromErrorBody,
+  parseJsonBody,
+} from '@/lib/api-errors';
+
+export { AuthSessionError, formatApiDetail, messageFromErrorBody, parseJsonBody };
 
 export type AuthRole = 'student' | 'teacher' | 'branch_admin' | 'super_admin';
 
@@ -57,19 +65,6 @@ export function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function formatApiDetail(detail: unknown, fallback: string): string {
-  if (typeof detail === 'string' && detail.trim()) return detail;
-  if (Array.isArray(detail)) {
-    const parts = detail.map((item) => {
-      if (typeof item === 'string') return item;
-      if (item && typeof item === 'object' && 'msg' in item) return String((item as { msg: unknown }).msg);
-      return '';
-    }).filter(Boolean);
-    if (parts.length) return parts.join('; ');
-  }
-  return fallback;
-}
-
 /** Normalize backend login JSON: { access_token, token_type, user }. */
 function parseLoginPayload(body: unknown): { access_token: string; user: AuthUser } {
   const root = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
@@ -93,12 +88,17 @@ function parseLoginPayload(body: unknown): { access_token: string; user: AuthUse
 }
 
 export async function apiLogin(username: string, password: string, role?: string) {
-  const res = await fetch(`${apiBase()}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, role }),
-  });
-  const body = await res.json().catch(() => ({}));
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, role }),
+    });
+  } catch {
+    throw new Error('Cannot connect to server. Make sure the backend is running.');
+  }
+  const body = await parseJsonBody(res);
   if (!res.ok) {
     const detail = (body as { detail?: unknown })?.detail;
     throw new Error(formatApiDetail(detail, 'Login failed'));
@@ -109,38 +109,53 @@ export async function apiLogin(username: string, password: string, role?: string
 }
 
 export async function apiMe() {
-  const res = await fetch(`${apiBase()}/auth/me`, { headers: { ...authHeaders() } });
-  if (!res.ok) throw new Error('Session expired');
-  const user = (await res.json().catch(() => null)) as AuthUser | null;
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}/auth/me`, { headers: { ...authHeaders() } });
+  } catch {
+    throw new AuthSessionError('Cannot reach server.', 'network');
+  }
+  if (res.status === 401 || res.status === 403) {
+    clearAuthSession();
+    throw new AuthSessionError('Session expired', 'unauthorized');
+  }
+  if (!res.ok) {
+    // Transient 5xx / network-ish failures — keep cached session.
+    throw new AuthSessionError(`Session check failed (${res.status})`, 'network');
+  }
+  const body = await parseJsonBody(res);
+  const user = (body && typeof body === 'object' ? body : null) as AuthUser | null;
   if (!user || typeof user !== 'object' || !user.role) {
     clearAuthSession();
-    throw new Error('Invalid authentication response.');
+    throw new AuthSessionError('Invalid authentication response.', 'invalid');
   }
   localStorage.setItem(USER_KEY, JSON.stringify(user));
   return user;
 }
 
 export async function orgFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
-    ...options,
-    headers: {
-      ...authHeaders(),
-      ...(options?.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-      ...(options?.headers as Record<string, string> | undefined),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}${path}`, {
+      ...options,
+      headers: {
+        ...authHeaders(),
+        ...(options?.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+        ...(options?.headers as Record<string, string> | undefined),
+      },
+    });
+  } catch {
+    throw new Error('Cannot connect to server. Make sure the backend is running.');
+  }
+  if (res.status === 401) {
+    clearAuthSession();
+  }
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    const body = await parseJsonBody(res);
+    throw new Error(messageFromErrorBody(body, res.status));
   }
   if (res.status === 204) return {} as T;
-  return res.json();
+  return (await parseJsonBody(res)) as T;
 }
 
 export function mapAuthRoleToUi(role: string): 'student' | 'teacher' | 'admin' | 'branch-admin' {

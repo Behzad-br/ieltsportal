@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -165,7 +165,10 @@ async def list_questions(
 async def writing_catalog(
     test_type: str = Query("academic"),
     db: Session = Depends(get_db),
+    student_id: str = Depends(get_student_id),
 ):
+    """Published question catalog — requires authenticated student (no anonymous bank dump)."""
+    _ = student_id
     if test_type not in ("academic", "general_training"):
         raise HTTPException(400, "test_type must be academic or general_training.")
     return writing_service.build_catalog(db, test_type)
@@ -197,7 +200,10 @@ async def get_question(
 
 @router.get("/writing/images/{question_id}")
 async def writing_image(question_id: str, n: int = 0, db: Session = Depends(get_db)):
+    """Serve Task 1 figures for published questions only (basename/root-jailed)."""
     q = _question_or_404(db, question_id)
+    if q.status != "published":
+        raise HTTPException(404, "No image for this question.")
     paths = []
     if q.image_path:
         paths.append(q.image_path)
@@ -285,6 +291,8 @@ async def autosave_attempt(
         )
     except PermissionError as exc:
         raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     return {
         "id": attempt.id,
         "status": "saved",
@@ -301,6 +309,10 @@ async def submit_attempt(
     student_id: str = Depends(get_student_id),
 ):
     attempt = _attempt_or_404(db, attempt_id, student_id)
+    # Idempotent duplicate submit — never mutate frozen text again.
+    if attempt.status in ("submitted", "grading", "graded", "teacher_review", "published"):
+        return _serialize_attempt(attempt)
+
     assignment = None
     if attempt.assignment_id:
         assignment = db.query(WritingAssignment).filter_by(id=attempt.assignment_id).first()
@@ -317,6 +329,8 @@ async def submit_attempt(
         )
     except PermissionError as exc:
         raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
     enabled = writing_service.ai_grading_enabled(db, assignment)
     if not enabled:
@@ -329,9 +343,14 @@ async def submit_attempt(
     try:
         await writing_ai.grade_attempt(db, attempt)
     except Exception as exc:
+        from app.ai_safety import public_ai_error
+
         logger.warning("Grading failed for %s: %s", attempt.id, exc)
+        # Essay already committed as submitted/grading — never roll back student work.
         attempt.status = "grading"
-        attempt.grading_error = str(exc)
+        attempt.grading_error = public_ai_error(
+            exc, fallback="Grading failed. Your essay is saved."
+        )
         db.commit()
     if attempt.mock_session_id:
         mock = db.query(WritingMockSession).filter_by(id=attempt.mock_session_id).first()
@@ -343,16 +362,28 @@ async def submit_attempt(
 @router.post("/writing/attempts/{attempt_id}/grade")
 async def retry_grade(
     attempt_id: str,
+    request: Request,
     db: Session = Depends(get_db),
     student_id: str = Depends(get_student_id),
 ):
+    from app.ai_safety import public_ai_error
+    from app.security_hardening import ai_limiter, client_ip, rate_limit_or_429
+
     attempt = _attempt_or_404(db, attempt_id, student_id)
     if attempt.status == "in_progress":
         raise HTTPException(400, "Submit the attempt before grading.")
+    if attempt.status in ("teacher_review", "published") or attempt.teacher_band is not None:
+        raise HTTPException(403, "Teacher has reviewed this attempt. AI regrade is not allowed.")
+    # Students may only retry after a failed AI grade — not unlimited regrades of success.
+    if attempt.status == "graded" and attempt.estimated_band is not None and not attempt.grading_error:
+        raise HTTPException(409, "Already graded. Ask your teacher if you need a regrade.")
+    if attempt.status not in ("submitted", "grading", "graded"):
+        raise HTTPException(400, "This attempt cannot be graded in its current state.")
+    rate_limit_or_429(ai_limiter, f"writing-grade:{student_id}:{client_ip(request)}")
     try:
         await writing_ai.grade_attempt(db, attempt)
     except Exception as exc:
-        raise HTTPException(503, f"Grading failed: {exc}")
+        raise HTTPException(503, public_ai_error(exc, fallback="Grading failed. Your essay is saved."))
     return _serialize_attempt(attempt)
 
 
@@ -360,19 +391,24 @@ async def retry_grade(
 async def model_answer(
     attempt_id: str,
     body: dict,
+    request: Request,
     db: Session = Depends(get_db),
     student_id: str = Depends(get_student_id),
 ):
+    from app.ai_safety import public_ai_error
+    from app.security_hardening import ai_limiter, client_ip, rate_limit_or_429
+
     attempt = _attempt_or_404(db, attempt_id, student_id)
     if attempt.status == "in_progress":
         raise HTTPException(400, "Submit first. Model answers are hidden before submission.")
     band_style = int(body.get("band_style") or 7)
     if band_style not in (7, 8, 9):
         raise HTTPException(400, "band_style must be 7, 8, or 9.")
+    rate_limit_or_429(ai_limiter, f"writing-model:{student_id}:{client_ip(request)}")
     try:
         text = await writing_ai.generate_model_answer(attempt, band_style, db)
     except (MinimaxError, ValueError) as exc:
-        raise HTTPException(503, str(exc))
+        raise HTTPException(503, public_ai_error(exc))
     row = WritingModelAnswer(
         attempt_id=attempt.id,
         question_id=attempt.question_id,
@@ -393,9 +429,14 @@ async def model_answer(
 @router.post("/writing/questions/generate")
 async def generate_question(
     body: dict,
+    request: Request,
     db: Session = Depends(get_db),
     student_id: str = Depends(get_student_id),
 ):
+    from app.ai_safety import public_ai_error
+    from app.security_hardening import ai_limiter, client_ip, rate_limit_or_429
+
+    rate_limit_or_429(ai_limiter, f"writing-gen:{student_id}:{client_ip(request)}")
     surprise = bool(body.get("surprise"))
     test_type = body.get("test_type") or "academic"
     task_number = int(body.get("task_number") or (2 if surprise else 1))
@@ -419,7 +460,7 @@ async def generate_question(
             student_id=student_id,
         )
     except Exception as exc:
-        raise HTTPException(503, f"AI generation failed: {exc}")
+        raise HTTPException(503, public_ai_error(exc, fallback="AI generation failed."))
     q, gen = writing_service.persist_generation(
         db,
         student_id,
@@ -540,7 +581,11 @@ async def submit_mock(
             try:
                 await writing_ai.grade_attempt(db, attempt)
             except Exception as exc:
-                attempt.grading_error = str(exc)
+                from app.ai_safety import public_ai_error
+
+                attempt.grading_error = public_ai_error(
+                    exc, fallback="Grading failed. Your essay is saved."
+                )
                 attempt.status = "grading"
                 db.commit()
         elif attempt.status == "submitted":

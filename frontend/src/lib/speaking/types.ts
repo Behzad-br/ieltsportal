@@ -95,6 +95,9 @@ export interface SessionResult {
   practice_part?: number | null;
   status: string;
   estimated_band: number | null;
+  teacher_band?: number | null;
+  final_band?: number | null;
+  band_source?: "teacher" | "ai_estimated" | "none" | string;
   started_at: string;
   completed_at: string | null;
   evaluation?: Evaluation | null;
@@ -107,6 +110,9 @@ export interface HistoryItem {
   title: string | null;
   practice_part?: number | null;
   estimated_band: number | null;
+  teacher_band?: number | null;
+  final_band?: number | null;
+  band_source?: "teacher" | "ai_estimated" | "none" | string;
   started_at: string;
   completed_at: string | null;
   status: string;

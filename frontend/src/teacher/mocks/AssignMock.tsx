@@ -175,9 +175,10 @@ export default function AssignMock() {
     }
     setBusy(true);
     try {
-      const refs = paperSource === 'bank' && paperPick
-        ? paperRefsFromPick(paperPick)
-        : buildManualRefs();
+      const refs: Record<string, unknown> =
+        paperSource === 'bank' && paperPick
+          ? paperRefsFromPick(paperPick)
+          : buildManualRefs();
       if (paperSource === 'bank' && paperPick?.sectionLabel) refs.section_label = paperPick.sectionLabel;
       await createMockAssignment({
         title: title.trim(),

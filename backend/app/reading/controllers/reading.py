@@ -58,12 +58,40 @@ def _build_slice(body_test_id: str, mode: str, passage_id: Optional[str], questi
 
 
 def _remaining(row: ReadingAttempt) -> Optional[int]:
+    """Server-derived remaining time from started_at + duration (not client clock)."""
     if not row.timed:
         return None
     if row.status != "in_progress" or not row.started_at:
         return row.remaining_seconds
     elapsed = int((datetime.utcnow() - row.started_at).total_seconds())
     return max(0, int(row.duration_seconds or 0) - elapsed)
+
+
+def _time_expired(row: ReadingAttempt) -> bool:
+    rem = _remaining(row)
+    return rem is not None and rem <= 0
+
+
+def _allowed_response_keys(sliced: dict) -> set[str]:
+    keys: set[str] = set()
+    for question in sliced.get("questions") or []:
+        if question.get("number") is not None:
+            keys.add(str(question["number"]))
+        if question.get("id"):
+            keys.add(str(question["id"]))
+    return keys
+
+
+def _merge_responses(row: ReadingAttempt, incoming: dict | None) -> dict:
+    """Merge only keys that belong to this attempt's question set."""
+    sliced = _rebuild_sliced(row)
+    allowed = _allowed_response_keys(sliced)
+    merged = dict(row.responses or {})
+    for key, value in (incoming or {}).items():
+        sk = str(key)
+        if sk in allowed:
+            merged[sk] = value
+    return merged
 
 
 def _payload_for_attempt(row: ReadingAttempt) -> dict:
@@ -250,14 +278,16 @@ async def save_responses(
     row = _attempt_or_404(db, attempt_id, student_id)
     if row.status != "in_progress":
         raise HTTPException(400, "This attempt is already submitted.")
-    merged = dict(row.responses)
-    for key, value in (body.responses or {}).items():
-        merged[str(key)] = value
+    if _time_expired(row):
+        raise HTTPException(400, "Time is up. Submit your attempt.")
+    merged = _merge_responses(row, body.responses)
     row.responses = merged
-    if body.remaining_seconds is not None:
-        row.remaining_seconds = max(0, int(body.remaining_seconds))
+    # Always persist server-derived remaining; never allow client to extend time.
+    server_rem = _remaining(row)
+    if server_rem is not None:
+        row.remaining_seconds = server_rem
     db.commit()
-    return {"ok": True, "saved": len(merged)}
+    return {"ok": True, "saved": len(merged), "remaining_seconds": server_rem}
 
 
 @router.post("/reading/attempts/{attempt_id}/submit")
@@ -270,10 +300,15 @@ async def submit_attempt(
     row = _attempt_or_404(db, attempt_id, student_id)
     if row.status == "submitted" and row.result:
         return row.result
-    merged = dict(row.responses)
-    for key, value in (body.responses or {}).items():
-        merged[str(key)] = value
+    if row.status != "in_progress":
+        raise HTTPException(400, "This attempt cannot be submitted.")
+    # After expiry, finalise with already-saved answers only (ignore late body edits).
+    if _time_expired(row):
+        merged = dict(row.responses or {})
+    else:
+        merged = _merge_responses(row, body.responses)
     row.responses = merged
+    server_rem = _remaining(row)
     sliced = _rebuild_sliced(row)
     result = grade_attempt(sliced, merged, bank.thresholds_for(row.test_type))
     row.result = result
@@ -281,8 +316,8 @@ async def submit_attempt(
     row.raw_score = result.get("raw_score")
     row.status = "submitted"
     row.submitted_at = datetime.utcnow()
-    if body.remaining_seconds is not None:
-        row.remaining_seconds = max(0, int(body.remaining_seconds))
+    if server_rem is not None:
+        row.remaining_seconds = server_rem
     db.commit()
     return result
 
@@ -341,7 +376,10 @@ async def reading_progress(
         .limit(20)
         .all()
     )
-    bands = [r.estimated_band for r in rows if r.estimated_band is not None]
+    from app.analytics.bands import average_bands, sanitize_band
+
+    bands = [sanitize_band(r.estimated_band) for r in rows]
+    bands = [b for b in bands if b is not None]
     type_stats: dict[str, dict] = {}
     for r in rows:
         result = r.result or {}
@@ -351,7 +389,7 @@ async def reading_progress(
             bucket["total"] += int(stats.get("total") or 0)
     return {
         "total_submitted": len(rows),
-        "average_band": round(sum(bands) / len(bands), 1) if bands else None,
+        "average_band": average_bands(bands),
         "recent_bands": bands[:10],
         "question_types": type_stats,
     }

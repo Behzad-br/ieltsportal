@@ -458,7 +458,7 @@ export default function ReadingRoom({ attemptId, onExit, onSubmitted }: { attemp
     try {
       const next = await submitReadingAttempt(attemptId, responses, remaining);
       setResult(next);
-      if (payload?.test.id) saveLocalPracticeResult("Reading", payload.test.id, next.estimated_band);
+      if (payload?.test.id) saveLocalPracticeResult("Reading", payload.test.id, next.estimated_band ?? undefined);
       onSubmitted?.();
     } catch (e: any) {
       submitted.current = false;

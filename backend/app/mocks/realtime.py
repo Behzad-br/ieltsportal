@@ -1,4 +1,8 @@
-"""Socket.IO for mock telemetry only. Live screens stay on LiveKit."""
+"""Socket.IO for mock telemetry only. Live screens stay on LiveKit.
+
+Connections require a valid JWT (auth.token or Authorization). Room join and
+events are bound to DB identity — client-supplied role/studentId are not trusted.
+"""
 from __future__ import annotations
 
 import logging
@@ -55,10 +59,100 @@ async def emit_assignment_state(assignment_id: str, payload: dict):
         logger.warning("Could not emit mock state: %s", exc)
 
 
+def _token_from_connect(environ, auth) -> str:
+    if isinstance(auth, dict):
+        raw = auth.get("token") or auth.get("access_token") or ""
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        authz = auth.get("Authorization") or auth.get("authorization") or ""
+        if isinstance(authz, str) and authz.lower().startswith("bearer "):
+            return authz[7:].strip()
+    # Engine.IO may expose HTTP headers on the environ.
+    headers = environ.get("HTTP_AUTHORIZATION") or ""
+    if isinstance(headers, str) and headers.lower().startswith("bearer "):
+        return headers[7:].strip()
+    return ""
+
+
+def _user_from_bearer(token: str):
+    from app.auth.models import User
+    from app.auth.security import decode_access_token
+    from app.database import SessionLocal
+    from app.auth.access import assert_user_campus_active
+
+    if not token or token == "demo-local-token":
+        return None
+    try:
+        payload = decode_access_token(token)
+    except Exception:
+        return None
+    user_id = str(payload.get("sub") or "").strip()
+    if not user_id:
+        return None
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user or not user.is_active:
+            return None
+        assert_user_campus_active(db, user)
+        return {
+            "user_id": user.id,
+            "role": user.role,
+            "branch_id": user.branch_id or "",
+        }
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
+def _teacher_may_join(db, assignment_id: str, user: dict) -> bool:
+    from app.mocks.models import MockAssignment, MockAssignmentStudent
+    from app.auth.models import User
+    from app.auth.access import users_in_branch
+
+    row = db.query(MockAssignment).filter_by(id=assignment_id).first()
+    if not row:
+        return False
+    role = user.get("role")
+    uid = user.get("user_id") or ""
+    if role == "super_admin":
+        return True
+    if role == "teacher" and (row.created_by or "") == uid:
+        return True
+    if role == "branch_admin":
+        campus = (user.get("branch_id") or "").strip()
+        if not campus:
+            return False
+        creator = db.query(User).filter_by(id=row.created_by).first() if row.created_by else None
+        if creator and (creator.branch_id or "").strip() == campus:
+            return True
+        slots = db.query(MockAssignmentStudent).filter_by(assignment_id=row.id).all()
+        allowed = set(users_in_branch(db, campus, role="student"))
+        return any(s.student_id in allowed for s in slots)
+    return False
+
+
+def _student_may_join(db, assignment_id: str, student_id: str) -> bool:
+    from app.mocks.models import MockAssignmentStudent
+
+    slot = (
+        db.query(MockAssignmentStudent)
+        .filter_by(assignment_id=assignment_id, student_id=student_id)
+        .first()
+    )
+    return bool(slot and not slot.cancelled)
+
+
 if sio is not None:
 
     @sio.event
     async def connect(sid, environ, auth):
+        token = _token_from_connect(environ, auth)
+        identity = _user_from_bearer(token)
+        if not identity:
+            return False
+        await sio.save_session(sid, identity)
         return True
 
     @sio.event
@@ -68,8 +162,9 @@ if sio is not None:
         except Exception:
             return
         assignment_id = (session or {}).get("assignment_id")
-        student_id = (session or {}).get("student_id")
-        if not assignment_id or (session or {}).get("role") != "student" or not student_id:
+        student_id = (session or {}).get("user_id")
+        role = (session or {}).get("role")
+        if not assignment_id or role != "student" or not student_id:
             return
         try:
             from app.database import SessionLocal
@@ -107,13 +202,39 @@ if sio is not None:
     @sio.on("join_assignment")
     async def join_assignment(sid, data):
         data = data or {}
-        assignment_id = str(data.get("assignmentId") or "")
-        role = str(data.get("role") or "")
-        if not assignment_id or role not in {"student", "teacher"}:
+        assignment_id = str(data.get("assignmentId") or "").strip()
+        if not assignment_id or len(assignment_id) > 80:
             return {"ok": False}
-        await sio.save_session(sid, {"assignment_id": assignment_id, "role": role, "student_id": data.get("studentId")})
-        await sio.enter_room(sid, f"assignment:{assignment_id}")
-        return {"ok": True}
+        try:
+            session = await sio.get_session(sid)
+        except Exception:
+            return {"ok": False}
+        if not session or not session.get("user_id"):
+            return {"ok": False}
+
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            role = session.get("role")
+            uid = session["user_id"]
+            if role == "student":
+                if not _student_may_join(db, assignment_id, uid):
+                    return {"ok": False}
+                room_role = "student"
+            elif role in {"teacher", "branch_admin", "super_admin"}:
+                if not _teacher_may_join(db, assignment_id, session):
+                    return {"ok": False}
+                room_role = "teacher"
+            else:
+                return {"ok": False}
+            session["assignment_id"] = assignment_id
+            session["room_role"] = room_role
+            await sio.save_session(sid, session)
+            await sio.enter_room(sid, f"assignment:{assignment_id}")
+            return {"ok": True}
+        finally:
+            db.close()
 
     @sio.on("teacher:voice")
     async def teacher_voice(sid, data):
@@ -123,12 +244,16 @@ if sio is not None:
             session = await sio.get_session(sid)
         except Exception:
             return {"ok": False}
-        if str((session or {}).get("role") or "") != "teacher":
+        if str((session or {}).get("room_role") or "") != "teacher":
             return {"ok": False}
-        assignment_id = str(data.get("assignmentId") or (session or {}).get("assignment_id") or "")
+        if str((session or {}).get("role") or "") not in {"teacher", "branch_admin", "super_admin"}:
+            return {"ok": False}
+        assignment_id = str(
+            (session or {}).get("assignment_id") or data.get("assignmentId") or ""
+        ).strip()
+        if not assignment_id or assignment_id != str((session or {}).get("assignment_id") or ""):
+            return {"ok": False}
         active = bool(data.get("active"))
-        if not assignment_id:
-            return {"ok": False}
         await emit_assignment_state(
             assignment_id,
             {
@@ -159,13 +284,23 @@ if sio is not None:
                     return {"ok": False}
                 session = await sio.get_session(sid)
                 role = str((session or {}).get("role") or "")
-                student_id = str((session or {}).get("student_id") or data.get("studentId") or "")
-                # Students may only emit for their own attempt; teachers may notify (e.g. live talk).
-                if role != "teacher" and student_id and attempt.student_id != student_id:
+                room_role = str((session or {}).get("room_role") or "")
+                uid = str((session or {}).get("user_id") or "")
+                joined = str((session or {}).get("assignment_id") or "")
+                if joined and joined != attempt.assignment_id:
+                    return {"ok": False}
+                # Students may only emit for their own attempt; teachers may notify.
+                if role == "student":
+                    if attempt.student_id != uid:
+                        return {"ok": False}
+                elif role in {"teacher", "branch_admin", "super_admin"}:
+                    if room_role != "teacher":
+                        return {"ok": False}
+                else:
                     return {"ok": False}
                 now = datetime.utcnow()
                 voice_only = event_type in ("TEACHER_VOICE_ON", "TEACHER_VOICE_OFF")
-                if not voice_only:
+                if not voice_only and role == "student":
                     attempt.last_seen_at = now
                     attempt.connection_status = "stable"
                     if data.get("currentSection"):

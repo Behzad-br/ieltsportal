@@ -98,7 +98,10 @@ nano .env
 Set at least:
 
 ```env
+ENVIRONMENT=production
 ENV=production
+AUTO_CREATE_SCHEMA=false
+REQUIRE_MIGRATIONS_AT_HEAD=true
 PORT=5000
 DB_HOST=localhost
 DB_PORT=3306
@@ -106,13 +109,20 @@ DB_NAME=fti4success_admin_itles
 DB_USER=fti4success_admin_itles_user
 DB_PASSWORD=           # real password — never commit
 DATA_DIR=/home/fti4success_admin/apps/itles-backend/data
+# Speaking/Notes media MUST survive deploys (same tree under DATA_DIR or absolute mounts):
+# SPEAKING_AUDIO_DIR=/home/fti4success_admin/apps/itles-backend/data/speaking_audio
+# NOTES_DIR=/home/fti4success_admin/apps/itles-backend/data/notes
 FRONTEND_URL=https://fti4iltes.tech
 CORS_ORIGINS=https://fti4iltes.tech,https://www.fti4iltes.tech
-JWT_SECRET=            # long random string
+JWT_SECRET=            # long random string — NOT change-me…
 AUTH_BOOTSTRAP_PASSWORD=
 AUTH_LEGACY_HEADERS=false
+ALLOW_WRITING_ADMIN_TOKEN=false
 OPENAI_API_KEY=
+WHISPER_MODEL=base
 ```
+
+OS packages already installed above must include **`ffmpeg`** (Speaking). Confirm with `ffmpeg -version` and `/api/health` fields `ffmpeg_available` / `speaking_deps_ready`.
 
 ---
 
@@ -126,9 +136,12 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Empty MySQL → create tables (additive only, never drops)
-python -m app.cli.migrate
-# equivalent: npm run migrate
+# Schema: Alembic owns staging/production (head 20261012_0007)
+alembic upgrade head
+alembic current   # must print 20261012_0007
+
+# Optional readiness gate (never prints secrets)
+python scripts/check_production_ready.py
 
 # Production process (preferred)
 pm2 start ecosystem.config.cjs
@@ -149,6 +162,7 @@ Health:
 ```bash
 curl -sS http://127.0.0.1:5000/api/health
 # expect: "status":"ok","database":true
+# also check: ffmpeg_available, whisper_importable, speaking_deps_ready, media_dirs_writable
 ```
 
 ### Updates later
@@ -158,10 +172,13 @@ cd /home/fti4success_admin/apps/itles-backend
 source .venv/bin/activate
 # upload new code, then:
 pip install -r requirements.txt
-python -m app.cli.migrate
+alembic upgrade head
+alembic current
 pm2 restart itles-api
 pm2 save
 ```
+
+**Do not** use `AUTO_CREATE_SCHEMA=true` or legacy `create_all` on production. Prefer `alembic upgrade head`. (`python -m app.cli.migrate --alembic` is an acceptable wrapper.)
 
 ---
 
@@ -204,11 +221,32 @@ rsync -a --delete dist/ /home/fti4success_admin/web/fti4iltes.tech/public_html/
 
 ---
 
-## 8. Backup
+## 8. Backup / recovery (operator checklist)
 
-1. `mysqldump fti4success_admin_itles > itles-YYYY-MM-DD.sql`
-2. Copy `/home/fti4success_admin/apps/itles-backend/data/`
-3. Private copy of `.env`
+Before any production cutover:
+
+1. Record Alembic revision (`alembic current` → expect `20261012_0007`).
+2. Take a DB recovery point:
+   - **MariaDB VPS:** `mysqldump fti4success_admin_itles > itles-YYYY-MM-DD.sql`
+   - **Neon staging/prod:** confirm PITR / branch restore owner and retention.
+3. Copy persistent media: `/home/fti4success_admin/apps/itles-backend/data/` (Speaking + Notes).
+4. Private encrypted copy of `.env`.
+
+**Rollback:** redeploy previous frontend `dist/` and previous backend commit/image. Prefer **forward-fix or restore dump** for DB — do **not** blindly `alembic downgrade` unless the migration is known reversible. Media volumes must outlive app rollbacks.
+
+---
+
+## 9. Safe deployment order
+
+1. Confirm recovery point (DB + media + `.env`)
+2. Set production env (`ENVIRONMENT=production`, strong `JWT_SECRET`, `AUTH_LEGACY_HEADERS=false`, `AUTO_CREATE_SCHEMA=false`)
+3. Ensure persistent `DATA_DIR` / Speaking / Notes dirs exist and are writable
+4. `alembic upgrade head` → verify `alembic current`
+5. Deploy backend → `curl /api/health`
+6. `python scripts/check_production_ready.py`
+7. Deploy frontend (`VITE_API_URL=https://api.fti4iltes.tech`, `VITE_DEMO_MODE` unset)
+8. Auth smoke (all four roles) + one skill each + cross-branch denial
+9. Monitor 5xx / login / media / AI / Whisper for 24h
 
 ---
 

@@ -31,19 +31,32 @@ async def list_history(db: Session = Depends(get_db), student_id: str = Depends(
         .order_by(TestSession.started_at.desc())
         .all()
     )
-    items = [
-        HistoryItemSchema(
-            session_id=s.id,
-            mode=s.mode,
-            title=s.title,
-            practice_part=s.practice_part,
-            estimated_band=s.estimated_band,
-            started_at=s.started_at,
-            completed_at=s.completed_at,
-            status=s.status,
+    items = []
+    for s in sessions:
+        ev = db.query(Evaluation).filter_by(session_id=s.id).first()
+        teacher_band = ev.teacher_band if ev else None
+        estimated = (ev.estimated_band if ev and ev.estimated_band is not None else s.estimated_band)
+        if teacher_band is not None:
+            final_band, source = teacher_band, "teacher"
+        elif estimated is not None:
+            final_band, source = estimated, "ai_estimated"
+        else:
+            final_band, source = None, "none"
+        items.append(
+            HistoryItemSchema(
+                session_id=s.id,
+                mode=s.mode,
+                title=s.title,
+                practice_part=s.practice_part,
+                estimated_band=estimated,
+                teacher_band=teacher_band,
+                final_band=final_band,
+                band_source=source,
+                started_at=s.started_at,
+                completed_at=s.completed_at,
+                status=s.status,
+            )
         )
-        for s in sessions
-    ]
     return HistoryListSchema(sessions=items, total=len(items))
 
 
@@ -132,13 +145,25 @@ async def get_session_result(
             )
         )
 
+    estimated = eval_schema.estimated_band if eval_schema else session.estimated_band
+    teacher_band = eval_row.teacher_band if eval_row else None
+    if teacher_band is not None:
+        final_band, source = teacher_band, "teacher"
+    elif estimated is not None:
+        final_band, source = estimated, "ai_estimated"
+    else:
+        final_band, source = None, "none"
+
     return SessionResultSchema(
         session_id=session.id,
         mode=session.mode,
         title=session.title,
         practice_part=session.practice_part,
         status=session.status,
-        estimated_band=(eval_schema.estimated_band if eval_schema else session.estimated_band),
+        estimated_band=estimated,
+        teacher_band=teacher_band,
+        final_band=final_band,
+        band_source=source,
         started_at=session.started_at,
         completed_at=session.completed_at,
         evaluation=eval_schema,
@@ -148,6 +173,8 @@ async def get_session_result(
 
 @router.get("/progress", response_model=ProgressSchema)
 async def get_progress(db: Session = Depends(get_db), student_id: str = Depends(get_student_id)):
+    from app.analytics.bands import average_bands, effective_result_band
+
     sessions = (
         db.query(TestSession)
         .filter(TestSession.status == "completed", TestSession.student_id == student_id)
@@ -160,9 +187,17 @@ async def get_progress(db: Session = Depends(get_db), student_id: str = Depends(
         .filter(TestSession.status == "completed", TestSession.student_id == student_id)
         .count()
     )
-    recent_bands = [s.estimated_band for s in sessions[:10]]
-    valid_bands = [b for b in recent_bands if b is not None]
-    avg_band = round(sum(valid_bands) / len(valid_bands), 1) if valid_bands else None
+    recent_bands = []
+    for s in sessions[:10]:
+        ev = db.query(Evaluation).filter_by(session_id=s.id).first()
+        recent_bands.append(
+            effective_result_band(
+                teacher_band=ev.teacher_band if ev else None,
+                final_band=ev.final_band if ev else None,
+                estimated_band=(ev.estimated_band if ev and ev.estimated_band is not None else s.estimated_band),
+            )
+        )
+    avg_band = average_bands(recent_bands)
 
     grammar_issues = []
     vocab_issues = []

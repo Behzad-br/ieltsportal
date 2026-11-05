@@ -12,27 +12,36 @@ from __future__ import annotations
 
 import sys
 import uuid
-from urllib.parse import urlparse
 
 
 def _safe_db_label(url: str) -> str:
-    try:
-        parsed = urlparse(url)
-        scheme = parsed.scheme or "unknown"
-        host = parsed.hostname or ("file" if scheme.startswith("sqlite") else "unknown")
-        db = (parsed.path or "").lstrip("/") or "(default)"
-        return f"{scheme}://{host}/{db}"
-    except Exception:
-        return "(unparseable)"
+    from app.db_security import redact_database_url
+
+    return redact_database_url(url)
 
 
 def main() -> int:
     from app.config import settings
     from app.database import SessionLocal, check_db, init_db
     from app.auth.models import Branch
+    from app.db_security import assert_safe_database_target, redact_secrets
+
+    # Refuse pytest/test processes from writing foundation probes to Neon.
+    try:
+        assert_safe_database_target(
+            settings.DATABASE_URL,
+            purpose="foundation probe write/delete",
+            allow_managed=False,
+            environment=settings.environment_name,
+        )
+    except RuntimeError as exc:
+        print(f"FAIL: {exc}")
+        return 1
 
     print("=== IELTS LMS foundation check ===")
     print(f"ENV / NODE_ENV : {(settings.ENV or settings.NODE_ENV or '(empty)')!r}")
+    print(f"ENVIRONMENT    : {settings.environment_name}")
+    print(f"AUTO_CREATE    : {settings.auto_create_schema}")
     print(f"is_production  : {settings.is_production}")
     print(f"PORT           : {settings.PORT}")
     print(f"FRONTEND_URL   : {settings.FRONTEND_URL}")
@@ -49,9 +58,12 @@ def main() -> int:
 
     try:
         init_db()
-        print("OK: schema init (create_all + additive migrations)")
+        if settings.auto_create_schema:
+            print("OK: schema init (create_all + additive migrations)")
+        else:
+            print("OK: schema verified (Alembic-managed; no create_all)")
     except Exception as exc:
-        print(f"FAIL: init_db — {exc}")
+        print(f"FAIL: init_db — {redact_secrets(str(exc))}")
         return 1
 
     probe_id = f"_foundation_probe_{uuid.uuid4().hex[:12]}"
@@ -81,7 +93,7 @@ def main() -> int:
         print("OK: database delete (probe cleaned up)")
     except Exception as exc:
         db.rollback()
-        print(f"FAIL: read/write probe — {exc}")
+        print(f"FAIL: read/write probe — {redact_secrets(str(exc))}")
         return 1
     finally:
         db.close()

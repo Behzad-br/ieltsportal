@@ -33,7 +33,14 @@ function relevanceLabel(label?: string | null) {
 
 export default function SpeakingFeedback({ result }: { result: SessionResult }) {
   const ev = result.evaluation;
-  const score = result.estimated_band ?? ev?.estimated_band;
+  const source = result.band_source || (result.teacher_band != null ? "teacher" : result.estimated_band != null || ev?.estimated_band != null ? "ai_estimated" : "none");
+  const score = result.final_band ?? result.teacher_band ?? result.estimated_band ?? ev?.estimated_band ?? null;
+  const heading =
+    source === "teacher"
+      ? "Teacher final band"
+      : source === "ai_estimated"
+        ? "Estimated practice band"
+        : "Band pending";
   const answers = result.answers || [];
   const why = uniqueLines([
     ...asLines(ev?.why_this_band),
@@ -57,14 +64,19 @@ export default function SpeakingFeedback({ result }: { result: SessionResult }) 
       ? "AI marking could not finish, so this is a local estimate from your transcript. Speak again if the comments look thin."
       : ev?.ai_status === "insufficient"
         ? "Not enough clear English was captured to mark this as a full speaking attempt."
-        : "This is practice feedback, not an official IELTS score. Pronunciation is not marked from the transcript.";
+        : source === "teacher"
+          ? "Teacher score is final for this practice attempt. The AI estimate is kept for comparison when available."
+          : "This is practice feedback, not an official IELTS score. Pronunciation is not marked from the transcript.";
 
   return (
     <div className="space-y-5">
       <div className="card p-6">
-        <div className="eyebrow">Estimated practice band</div>
+        <div className="eyebrow">{heading}</div>
         <h2 className="mt-2 font-display text-2xl font-bold">{result.title || "Speaking result"}</h2>
         <div className="metric-number mt-4 text-5xl font-bold">{score ?? "—"}</div>
+        {result.teacher_band != null && result.estimated_band != null && result.teacher_band !== result.estimated_band && (
+          <p className="mt-2 text-sm text-muted-foreground">AI estimate: {result.estimated_band}</p>
+        )}
         <p className="mt-3 text-xs text-muted-foreground">{fallbackNote}</p>
         <div className="mt-4 flex flex-wrap gap-2 text-sm">
           <span className="rounded-lg bg-muted px-3 py-1.5 font-semibold">

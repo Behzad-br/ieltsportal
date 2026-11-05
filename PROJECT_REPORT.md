@@ -3,234 +3,169 @@
 **Product name:** FTI IELTS Learning Management System (Writewise / IELTS Speaking AI stack)  
 **Organization:** FTI network campuses  
 **Production:** https://fti4iltes.tech · API https://api.fti4iltes.tech  
-**Report date:** September 2026  
+**Report date:** October 2026 (Modules 1–24 complete)  
 
 ---
 
-## 1. Project kya hai?
+## 1. What this is
 
-Ye ek **multi-campus IELTS Learning Management System (LMS)** hai jo FTI branches ke liye bana hai.
+A **multi-campus IELTS Learning Management System (LMS)** for FTI branches.
 
-Isme students, teachers, branch admins aur super admin ek hi platform pe kaam karte hain:
+Students, teachers, branch admins, and super admins share one platform for:
 
-- IELTS **Reading, Listening, Writing, Speaking** practice  
-- Teacher **homework** assign + review  
-- **Mock exams** (timed / monitored)  
-- Class **notes** share  
-- AI se **estimated band feedback** (official IELTS score nahi — practice estimate)
-
----
-
-## 2. Kyun bana hai? (Purpose)
-
-| Problem | Solution is project se |
-| --- | --- |
-| Har campus alag process / WhatsApp pe homework | Central LMS — har branch apna workspace |
-| Students ko structured IELTS practice nahi milti | 4 skills + banks + AI feedback |
-| Teachers ko submissions track karna mushkil | Homework queue, reviews, student record |
-| Super admin ko network-wide control chahiye | Branches + branch admins manage |
-| Official test se pehle practice feedback | AI estimated bands (Writing / Speaking) |
-
-**Goal:** FTI students ko class ke bahar bhi continuous IELTS practice + teachers ko campus-level control.
+- IELTS **Reading, Listening, Writing, Speaking** practice (DB-backed attempts)
+- Teacher **homework** assign + review
+- **Single-skill Mock Exams** (timed / monitored — one IELTS skill per assignment)
+- Class **notes** share
+- AI **estimated** band feedback (practice estimate — not an official IELTS score)
+- Role-scoped **results** and **analytics**
 
 ---
 
-## 3. Tech stack
+## 2. Tech stack (actual)
 
 | Layer | Technology |
 | --- | --- |
 | Frontend | React 19 + TypeScript + Vite + Tailwind + Wouter |
 | Backend | Python FastAPI + SQLAlchemy + Uvicorn |
-| Realtime | Socket.IO (mock live monitoring) |
-| Auth | JWT (`access_token`) + PBKDF2 password hashing |
-| Database | MySQL (production) / SQLite (local/dev) |
-| AI | OpenAI / LLM for writing & speaking feedback |
-| Speech | OpenAI Whisper (speaking transcription) |
-| Deploy (prod) | HestiaCP + Nginx + PM2 |
-| Staging option | Vercel (frontend) + Render (backend) |
+| Realtime | Socket.IO (JWT-authenticated mock telemetry) |
+| Auth | JWT (`HS256`) + DB-backed identity; PBKDF2-SHA256 passwords |
+| Database | **PostgreSQL (Neon)** for staging/verify; **MySQL/MariaDB** for Hestia VPS prod; SQLite for local/tests. **No Supabase client.** |
+| Migrations | **Alembic** owns staging/production schema — head `20261012_0007` |
+| AI | Server-side LLM (OpenAI / MiniMax) for writing & speaking feedback |
+| Speech | OpenAI Whisper + **FFmpeg** (OS package required for Speaking) |
+| Deploy | HestiaCP + Nginx + PM2 (API); SPA on `fti4iltes.tech` |
+
+Local topology: Frontend `:5173` → Vite `/api` proxy → Backend `:5000` → DB.
 
 ---
 
-## 4. User roles (4 types)
+## 3. Roles
 
-| Role | Login page | Backend role value |
+| Role | Login | Backend value |
 | --- | --- | --- |
 | Super Admin | `/super-admin-login` | `super_admin` |
 | Branch Admin | `/branch-admin-login` | `branch_admin` |
 | Teacher | `/login` | `teacher` |
 | Student | `/login` | `student` |
 
-Har login ke baad JWT milta hai: `{ access_token, user: { id, role, branch_id, ... } }`.
+Frontend route guards are UX only. **Backend is the authorization authority.**
+
+Production requires:
+
+- `AUTH_LEGACY_HEADERS=false`
+- strong `JWT_SECRET` (not the placeholder)
+- `AUTO_CREATE_SCHEMA=false` (Alembic owns schema)
+- Postgres `sslmode=require` on managed DBs
+- `VITE_DEMO_MODE` unset/false
 
 ---
 
-## 5. Features by role (complete)
+## 4. Architecture principles (Modules 1–24)
 
-### 5.1 Super Admin
-
-- Network-wide dashboard  
-- **Branches create / edit / remove** (campus name, city, image)  
-- **Branch Admin accounts** create with username + password (hashed in DB)  
-- View branch admins list  
-- Teachers / students overview across network  
-- Reports  
-- Super Admin settings (profile / password)  
-- Practice papers management (UI)  
-
-### 5.2 Branch Admin
-
-- **Only apni branch** dekhta / manage karta hai  
-- Teachers add / edit / remove (branch-scoped)  
-- Students add / edit / remove  
-- Batches create / manage  
-- Branch reports  
-- Own account settings (name, username, password → live API)  
-
-### 5.3 Teacher
-
-- Dashboard (homework queue, batches snapshot)  
-- **Batches** list + detail  
-- **Students** roster + student detail / work record  
-- **Homework Composer** — assign Reading / Listening / Writing / Speaking  
-  - From practice bank, manual, or AI-assisted preview  
-  - Entire batch or specific students  
-  - Optional AI grading flag  
-- Homework list + submissions + review  
-- **Review queue** for student writing  
-- **Notes** — upload PDF/docs, unlock by batch or student  
-- **Mock exams**  
-  - Library  
-  - Assign mock  
-  - Assigned list  
-  - Live monitoring (Socket.IO / LiveKit optional)  
-  - Results / publish review  
-- Teacher settings  
-
-### 5.4 Student
-
-- Dashboard (open homework, mocks, practice shortcuts)  
-- **Homework** list → open → do → submit  
-- **Notes** library → page reader (watermarked where locked rules apply)  
-- **IELTS Practice** hub — Reading / Listening / Writing / Speaking  
-- Practice rooms (timed writing, audio listening, mic speaking, reading highlights)  
-- AI / estimated feedback screens  
-- Results + history  
-- **Mock tests** inbox → briefing → timed mock room → submit  
-- Profile / notifications  
-- Sign out clears JWT session  
+- **Branch isolation** enforced server-side
+- Student work **persisted before AI/STT** when those fail
+- Answer keys **hidden** before Reading/Listening submit
+- Academic scores are **server-calculated** or teacher-reviewed — not client-trusted
+- Socket.IO requires **JWT**; room join is ownership-scoped
+- LiveKit token mint is **JWT-role + assignment scoped** (optional when unconfigured)
+- Private media (Speaking recordings, Notes, Homework audio) is **ACL-protected**
+- Persistent media must live under configured `DATA_DIR` / `SPEAKING_AUDIO_DIR` / `NOTES_DIR` (not ephemeral container disk alone)
 
 ---
 
-## 6. IELTS skill modules (detail)
+## 5. Features by role
 
-### Reading
-- Catalog of Academic / General tests from banks  
-- Passage practice, highlights  
-- Submit answers → scored result  
-- History of attempts  
+### Super Admin
+Network dashboard, branches create/edit/status, initial Branch Admins, org overview, network analytics.
 
-### Listening
-- Catalog of listening tests + audio  
-- Section practice / full mock style attempts  
-- Submit answers → score  
-- History  
+### Branch Admin
+Own campus only: teachers, students, batches, campus analytics. Cannot access other branches.
 
-### Writing
-- Task questions + full mock tests  
-- Autosave drafts  
-- Submit for AI estimated band / teacher review  
-- Teacher override / feedback  
-- Admin question bank tools (writing admin API)  
+### Teacher
+Campus students/batches, Homework composer, Notes, single-skill Mocks, review/publish, teacher analytics.
 
-### Speaking
-- Stored / fresh tests  
-- Mic recording  
-- Whisper transcription  
-- AI evaluation (fluency, lexical, grammar, pronunciation style feedback)  
-- Session history + progress  
-
-**Important:** Practice bands are **estimates**, not official IELTS scores.
+### Student
+Dashboard, four-skill practice, homework, notes (unlocked only), mock inbox, results, student analytics.
 
 ---
 
-## 7. Cross-cutting features
+## 6. IELTS skills
 
-| Feature | Description |
-| --- | --- |
-| JWT Auth | Login, `/auth/me`, change password, role guards |
-| Org API | Users, branches, batches CRUD with branch isolation |
-| Homework API | Teacher assign / student start & submit / review |
-| Notes API | Teacher upload + access control; student page images |
-| Mocks API | Assign, attempt, heartbeat, submit, review, LiveKit token |
-| Notifications | Student notification bell |
-| Hydrate org | After login, pulls backend org data into UI store |
-| Security | Rate-limited login, hashed passwords, AUTH_LEGACY_HEADERS off in prod, speaking ownership checks |
-| CORS | Production locked to `fti4iltes.tech` |
+| Skill | Persistence | Notes |
+| --- | --- | --- |
+| Reading | `reading_attempts` | Keys stripped pre-submit; idempotent submit |
+| Listening | `listening_attempts` | Public pack audio; scored submit |
+| Writing | `writing_attempts` | Draft autosave; AI fail → essay kept |
+| Speaking | `test_sessions` + audio files | Whisper+FFmpeg; durable audio dir required |
+
+**Practice bands are estimates**, not official IELTS scores.
 
 ---
 
-## 8. Main API map
+## 7. Mock exams (product limitation)
+
+Mocks are **one IELTS skill per assignment** (Reading **or** Listening **or** Writing **or** Speaking).
+
+They are **not** a combined four-skill full IELTS mock. UI and APIs must not imply an overall four-skill IELTS score from a single-skill assignment.
+
+---
+
+## 8. Security posture (Modules 20–23)
+
+- JWT → reload user from DB (forged role/branch claims ignored)
+- Cross-student / cross-branch IDOR matrix covered
+- Homework nested answer keys recursively stripped
+- Ops `WRITING_ADMIN_TOKEN` disabled in production unless `ALLOW_WRITING_ADMIN_TOKEN=true`
+- CORS allowlist (no `*` + credentials)
+- Security headers: nosniff, frame deny, referrer, permissions, HSTS on HTTPS
+- Error responses sanitized (no secrets/tracebacks in production)
+
+Residual accepted risks: ~12h JWT without server blacklist; token in `localStorage` (XSS surface); public practice pack media by design.
+
+---
+
+## 9. Main API map
 
 | Prefix | Purpose |
 | --- | --- |
 | `/api/auth/*` | Login, me, change-password |
 | `/api/org/*` | Users, branches, batches |
-| `/api/health` | Health check |
-| `/api/tests/*`, `/api/answers/*`, `/api/history/*`, `/api/progress` | Speaking |
+| `/api/health` | Health + DB + Speaking dependency flags |
+| `/api/tests/*`, `/api/answers/*`, `/api/history/*` | Speaking |
 | `/api/writing/*`, `/api/writing/admin/*` | Writing |
 | `/api/reading/*` | Reading |
 | `/api/listening/*` | Listening |
 | `/api/homework/*` | Homework |
 | `/api/notes/*` | Notes |
-| `/api/mocks/*` | Mock exams + live |
-| Socket.IO | Mock realtime events |
+| `/api/mocks/*` | Single-skill mocks + LiveKit token |
+| `/api/analytics/*` | Role-scoped analytics |
+| Socket.IO | Mock realtime (JWT required) |
 
 ---
 
-## 9. Repo structure (high level)
+## 10. Deployment
 
-```text
-frontend/          React SPA (student / teacher / admin / branch-admin UIs)
-backend/           FastAPI app (auth, org, 4 skills, homework, notes, mocks)
-data/              Practice banks, media (large packs usually not in git)
-scripts/           Local start helpers (start-all.ps1)
-DEPLOYMENT.md      HestiaCP production guide
-STAGING.md         Vercel + Render staging guide
-render.yaml        Render backend blueprint
-frontend/vercel.json  Vercel SPA rewrites
-```
+Authoritative guide: `DEPLOYMENT.md` (Hestia VPS).
 
-### Frontend key areas
-- `src/App.tsx` — routes, login, shells  
-- `src/admin/` — Super Admin + Branch Admin workspace  
-- `src/teacher/` — homework, notes, mocks, students  
-- `src/student/` — dashboard, homework, notes, mocks, practice  
-- `src/practice/` — Reading / Listening / Writing / Speaking rooms  
-- `src/lib/*-api.ts` — API clients + auth  
+Required OS packages: `python3`, `ffmpeg`.  
+Backend: `pip install -r requirements.txt` then `alembic upgrade head` then uvicorn/`asgi_app`.  
+Frontend: `npm ci` / `npm install`, set `VITE_API_URL` for production builds, `npm run build`.
 
-### Backend key areas
-- `app/auth/` — users, branches, JWT, bootstrap  
-- `app/speaking|reading|listening|writing/` — skill modules  
-- `app/homework/`, `app/notes/`, `app/mocks/` — LMS features  
-- `app/security_hardening.py` — rate limits / production gates  
+Readiness validators:
 
----
-
-## 10. Typical user journeys
-
-1. **Super Admin** branch banata hai + branch admin credentials set karta hai  
-2. **Branch Admin** login → teachers, students, batches add karta hai  
-3. **Teacher** homework / notes / mock assign karta hai  
-4. **Student** practice karta hai, homework submit karta hai, mock attempt karta hai  
-5. **Teacher** review / band publish karta hai  
+- `python scripts/check_db_security_config.py`
+- `python scripts/check_production_ready.py`
+- `python scripts/neon_m24_verify.py` (Neon E2E)
 
 ---
 
 ## 11. What this is NOT
 
-- Official British Council / IDP IELTS exam platform nahi  
-- AI band = **estimate only**  
-- Free public consumer app nahi — FTI campus LMS hai  
+- Official British Council / IDP IELTS exam platform
+- AI band ≠ official score
+- Free public consumer app — FTI campus LMS
+- Full four-skill combined mock exam product
 
 ---
 
@@ -240,9 +175,10 @@ frontend/vercel.json  Vercel SPA rewrites
 | --- | --- |
 | `README.md` | Quick start |
 | `DEPLOYMENT.md` | Production VPS (Hestia) |
-| `STAGING.md` | Cloud staging (Vercel/Render) |
-| `PROJECT_REPORT.md` | Ye report — product + features |
+| `backend/docs/MIGRATIONS.md` | Alembic |
+| `backend/API_CONTRACT.md` | API consistency notes |
+| `PROJECT_REPORT.md` | This report |
 
 ---
 
-*End of report.*
+*Modules 1–24 audit/hardening program complete. See Module 24 report for GO/NO-GO.*

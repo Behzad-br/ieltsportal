@@ -8,6 +8,7 @@ import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from unittest.mock import AsyncMock, patch
 
 # Import models FIRST so Base knows about all tables
@@ -27,15 +28,30 @@ from app.config import settings
 settings.AUTH_LEGACY_HEADERS = True
 settings.AUTH_BOOTSTRAP_PASSWORD = ""  # avoid auto-admin side effects in tests
 
-# In-memory SQLite with shared cache so all connections see the same data
-_TEST_DB_URL = "sqlite:///file:testdb_ielts?mode=memory&cache=shared&uri=true"
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters():
+    """Auth matrix tests issue many /auth/login calls; keep limiter from leaking 429s."""
+    from app.security_hardening import ai_limiter, login_limiter, upload_limiter
+
+    login_limiter.reset()
+    ai_limiter.reset()
+    upload_limiter.reset()
+    yield
+    login_limiter.reset()
+    ai_limiter.reset()
+    upload_limiter.reset()
+
+# Single shared in-memory SQLite connection (avoids closed-DB teardown races).
+# Tests must never open the process DATABASE_URL (often Neon) for suite setup.
 _engine = create_engine(
-    _TEST_DB_URL,
+    "sqlite://",
     connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
 )
 _TestSessionFactory = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
 
-# Create tables IMMEDIATELY on module load
+# Create tables IMMEDIATELY on module load (isolated SQLite — never Neon).
 Base.metadata.create_all(bind=_engine)
 
 

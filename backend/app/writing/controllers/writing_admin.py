@@ -1,4 +1,12 @@
-"""Teacher/admin IELTS Writing API. Protected by WRITING_ADMIN_TOKEN."""
+"""Teacher/admin IELTS Writing API.
+
+Auth preference (Module 6):
+1. Teacher / Branch Admin / Super Admin JWT (preferred for app UI)
+2. Legacy shared WRITING_ADMIN_TOKEN when JWT is absent (scripts / ops)
+
+When a JWT staff user is present, student-scoped routes are branch-filtered.
+Token-only access remains globally elevated — documented residual risk.
+"""
 from __future__ import annotations
 
 import csv
@@ -8,13 +16,15 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.auth.access import users_in_branch
 from app.auth.deps import get_optional_user
+from app.auth.models import User
 from app.config import settings
 from app.database import get_db
 from app.writing.models import (
@@ -34,21 +44,53 @@ from app.writing.services.writing_import import import_file, import_records, loa
 
 router = APIRouter()
 
+# Sentinel returned for legacy shared-token auth (unscoped).
+TOKEN_ADMIN = "token_admin"
+
 
 def require_admin(
-    user=Depends(get_optional_user),
+    user: Optional[User] = Depends(get_optional_user),
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-) -> str:
-    """Prefer WRITING_ADMIN_TOKEN when set; otherwise require teacher/admin JWT."""
-    expected = (settings.WRITING_ADMIN_TOKEN or "").strip()
-    provided = (x_admin_token or "").strip()
-    if expected:
-        if provided != expected:
-            raise HTTPException(403, "Admin token required.")
-        return "admin"
+) -> Union[User, str]:
+    """
+    Prefer JWT staff. Shared WRITING_ADMIN_TOKEN is fallback only when no JWT staff
+    and ALLOW_WRITING_ADMIN_TOKEN permits it (disabled by default in production).
+    """
     if user and getattr(user, "role", None) in {"teacher", "branch_admin", "super_admin"}:
-        return user.id
+        return user
+    provided = (x_admin_token or "").strip()
+    if settings.writing_admin_token_allowed:
+        expected = (settings.WRITING_ADMIN_TOKEN or "").strip()
+        if expected and provided == expected:
+            return TOKEN_ADMIN
+        if expected and provided and provided != expected:
+            raise HTTPException(403, "Admin token required.")
+    elif provided:
+        raise HTTPException(403, "Ops admin token is disabled.")
     raise HTTPException(403, "Admin authentication required.")
+
+
+def _actor_id(actor: Union[User, str]) -> str:
+    return actor.id if isinstance(actor, User) else "admin"
+
+
+def _allowed_student_ids(db: Session, actor: Union[User, str]) -> set[str] | None:
+    """None = unrestricted (SA or legacy token). Else branch student ids."""
+    if isinstance(actor, str):
+        return None
+    if actor.role == "super_admin":
+        return None
+    if actor.role in {"teacher", "branch_admin"}:
+        return set(users_in_branch(db, actor.branch_id or "", role="student"))
+    return set()
+
+
+def _assert_attempt_in_scope(db: Session, attempt: WritingAttempt, actor: Union[User, str]) -> None:
+    allowed = _allowed_student_ids(db, actor)
+    if allowed is None:
+        return
+    if (attempt.student_id or "") not in allowed:
+        raise HTTPException(403, "Not allowed for this submission.")
 
 
 def _q(db: Session, question_id: str) -> WritingQuestion:
@@ -377,7 +419,7 @@ async def submissions(
     status: Optional[str] = None,
     student_id: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
+    actor: Union[User, str] = Depends(require_admin),
 ):
     q = db.query(WritingAttempt).filter(WritingAttempt.status != "in_progress")
     if status:
@@ -385,6 +427,9 @@ async def submissions(
     if student_id:
         q = q.filter(WritingAttempt.student_id == student_id)
     rows = q.order_by(WritingAttempt.submitted_at.desc().nullslast()).all()
+    allowed = _allowed_student_ids(db, actor)
+    if allowed is not None:
+        rows = [a for a in rows if (a.student_id or "") in allowed]
     return {
         "submissions": [
             {
@@ -405,11 +450,14 @@ async def submissions(
 
 @router.get("/writing/admin/submissions/{attempt_id}")
 async def submission_detail(
-    attempt_id: str, db: Session = Depends(get_db), _: str = Depends(require_admin)
+    attempt_id: str,
+    db: Session = Depends(get_db),
+    actor: Union[User, str] = Depends(require_admin),
 ):
     a = db.query(WritingAttempt).filter_by(id=attempt_id).first()
     if not a:
         raise HTTPException(404, "Submission not found.")
+    _assert_attempt_in_scope(db, a, actor)
     return {
         "id": a.id,
         "student_id": a.student_id,
@@ -430,13 +478,19 @@ async def submission_detail(
 
 @router.post("/writing/admin/submissions/{attempt_id}/review")
 async def teacher_review(
-    attempt_id: str, body: dict, db: Session = Depends(get_db), _: str = Depends(require_admin)
+    attempt_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    actor: Union[User, str] = Depends(require_admin),
 ):
     a = db.query(WritingAttempt).filter_by(id=attempt_id).first()
     if not a:
         raise HTTPException(404, "Submission not found.")
+    _assert_attempt_in_scope(db, a, actor)
     if "teacher_band" in body:
-        a.teacher_band = float(body["teacher_band"]) if body["teacher_band"] is not None else None
+        from app.ielts_bands import parse_ielts_band
+
+        a.teacher_band = parse_ielts_band(body["teacher_band"], field="teacher_band")
     if "teacher_comments" in body:
         a.teacher_comments = body["teacher_comments"]
     if "teacher_feedback" in body:
@@ -456,24 +510,57 @@ async def teacher_review(
 
 
 @router.post("/writing/admin/submissions/{attempt_id}/regrade")
-async def regrade(attempt_id: str, db: Session = Depends(get_db), _: str = Depends(require_admin)):
+async def regrade(
+    attempt_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    actor: Union[User, str] = Depends(require_admin),
+):
+    from app.ai_safety import public_ai_error
+    from app.security_hardening import ai_limiter, client_ip, rate_limit_or_429
+
     a = db.query(WritingAttempt).filter_by(id=attempt_id).first()
     if not a:
         raise HTTPException(404, "Submission not found.")
+    _assert_attempt_in_scope(db, a, actor)
+    actor_key = getattr(actor, "id", None) or str(actor)
+    rate_limit_or_429(ai_limiter, f"writing-admin-regrade:{actor_key}:{client_ip(request)}")
+    teacher_band_before = a.teacher_band
+    final_before = a.final_band
     try:
         await writing_ai.grade_attempt(db, a)
     except Exception as exc:
-        raise HTTPException(503, str(exc))
-    return {"id": a.id, "status": a.status, "estimated_band": a.estimated_band, "grading": a.grading}
+        raise HTTPException(503, public_ai_error(exc))
+    # Defensive: teacher scores must survive AI regrade.
+    if teacher_band_before is not None:
+        a.teacher_band = teacher_band_before
+        a.final_band = teacher_band_before if final_before is None else final_before
+        db.commit()
+    return {
+        "id": a.id,
+        "status": a.status,
+        "estimated_band": a.estimated_band,
+        "teacher_band": a.teacher_band,
+        "final_band": a.final_band,
+        "grading": a.grading,
+    }
 
 
 @router.post("/writing/admin/assignments")
-async def create_assignment(body: dict, db: Session = Depends(get_db), _: str = Depends(require_admin)):
+async def create_assignment(
+    body: dict,
+    db: Session = Depends(get_db),
+    actor: Union[User, str] = Depends(require_admin),
+):
     deadline = body.get("deadline")
     parsed = datetime.fromisoformat(deadline.replace("Z", "+00:00")) if deadline else None
+    student_id = (body.get("student_id") or "").strip() or None
+    allowed = _allowed_student_ids(db, actor)
+    if student_id and allowed is not None and student_id not in allowed:
+        raise HTTPException(403, "Cannot assign students outside your branch.")
     row = WritingAssignment(
         title=body.get("title") or "Writing assignment",
-        student_id=body.get("student_id"),
+        student_id=student_id,
         batch_label=body.get("batch_label"),
         question_id=body.get("question_id"),
         mock_test_type=body.get("mock_test_type"),
@@ -482,7 +569,7 @@ async def create_assignment(body: dict, db: Session = Depends(get_db), _: str = 
         ai_grading_enabled=bool(body.get("ai_grading_enabled", True)),
         lock_after_deadline=bool(body.get("lock_after_deadline", True)),
         allow_late=bool(body.get("allow_late", False)),
-        created_by="admin",
+        created_by=_actor_id(actor),
     )
     db.add(row)
     db.commit()
@@ -491,8 +578,22 @@ async def create_assignment(body: dict, db: Session = Depends(get_db), _: str = 
 
 
 @router.get("/writing/admin/assignments")
-async def list_assignments(db: Session = Depends(get_db), _: str = Depends(require_admin)):
+async def list_assignments(
+    db: Session = Depends(get_db),
+    actor: Union[User, str] = Depends(require_admin),
+):
     rows = db.query(WritingAssignment).order_by(WritingAssignment.created_at.desc()).all()
+    allowed = _allowed_student_ids(db, actor)
+    if allowed is not None:
+        # Branch teachers/BA: only assignments targeting their students, or
+        # broadcast (null student_id) created by them.
+        actor_id = _actor_id(actor)
+        rows = [
+            a
+            for a in rows
+            if (a.student_id and a.student_id in allowed)
+            or (a.student_id is None and a.created_by == actor_id)
+        ]
     return {
         "assignments": [
             {

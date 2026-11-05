@@ -63,11 +63,15 @@ class Answer(Base):
     session_id = Column(String, ForeignKey("test_sessions.id"), nullable=False)
     question_id = Column(String, ForeignKey("questions.id"), nullable=False)
     transcript = Column(Text, nullable=True)
+    audio_path = Column(String, nullable=True)          # durable relative/basename under SPEAKING_AUDIO_DIR
+    audio_mime = Column(String, nullable=True)
     audio_duration = Column(Float, nullable=True)   # seconds
     word_count = Column(Integer, nullable=True)
     filler_count = Column(Integer, nullable=True)
     words_per_minute = Column(Float, nullable=True)
+    transcription_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     session = relationship("TestSession", back_populates="answers")
     question = relationship("Question", back_populates="answer")
@@ -83,6 +87,9 @@ class Evaluation(Base):
     grammar = Column(Float, nullable=True)
     pronunciation = Column(String, default="Not assessed in this version")
     estimated_band = Column(Float, nullable=True)
+    teacher_band = Column(Float, nullable=True)
+    final_band = Column(Float, nullable=True)
+    teacher_comments = Column(Text, nullable=True)
     strengths_json = Column(Text, nullable=True)       # JSON list
     weaknesses_json = Column(Text, nullable=True)      # JSON list
     corrections_json = Column(Text, nullable=True)     # JSON list of {original, better}

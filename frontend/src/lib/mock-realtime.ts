@@ -1,5 +1,6 @@
 import { io, type Socket } from 'socket.io-client';
 import { socketOrigin } from '@/lib/api-base';
+import { getAccessToken } from '@/lib/auth-api';
 import { DEMO_MODE } from '@/lib/demo-mode';
 import { demoBusPublish, demoMockSocketFacade } from '@/lib/demo-mock-bus';
 
@@ -13,7 +14,13 @@ export function mockSocket() {
     return demoSocket as unknown as Socket;
   }
   if (!socket) {
-    socket = io(socketOrigin(), { path: '/socket.io', transports: ['websocket', 'polling'], autoConnect: true });
+    socket = io(socketOrigin(), {
+      path: '/socket.io',
+      transports: ['websocket', 'polling'],
+      autoConnect: true,
+      // Backend Socket.IO requires JWT — never trust client-only room join.
+      auth: () => ({ token: getAccessToken() }),
+    });
     socket.on('connect', () => {
       if (lastJoin) socket?.emit('join_assignment', lastJoin);
     });

@@ -216,12 +216,14 @@ class MinimaxClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        retries: int = 2,
+        retries: Optional[int] = None,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
     ) -> dict:
         """Chat completion expecting a JSON response."""
         last_error: Optional[Exception] = None
+        if retries is None:
+            retries = max(0, int(getattr(settings, "LLM_MAX_RETRIES", 2) or 0))
 
         for attempt in range(retries + 1):
             try:

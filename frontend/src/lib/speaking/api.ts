@@ -10,6 +10,8 @@ import {
 } from "./types";
 import { apiBase } from "@/lib/api-base";
 import { studentAuthHeaders } from "@/lib/api-auth-headers";
+import { messageFromErrorBody, parseJsonBody } from "@/lib/api-errors";
+import { clearAuthSession } from "@/lib/auth-api";
 
 async function request<T>(
   path: string,
@@ -32,16 +34,16 @@ async function request<T>(
     );
   }
 
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {}
-    throw new Error(detail);
+  if (res.status === 401) {
+    clearAuthSession();
   }
 
-  return res.json();
+  if (!res.ok) {
+    const body = await parseJsonBody(res);
+    throw new Error(messageFromErrorBody(body, res.status));
+  }
+
+  return (await parseJsonBody(res)) as T;
 }
 
 

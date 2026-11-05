@@ -125,6 +125,7 @@ def seed_gujranwala(db: Session) -> dict:
             db.add(branch)
         branch.name = spec["name"]
         branch.city = spec["city"]
+        branch.is_active = True
 
         ba = _upsert_user(
             db,
@@ -334,6 +335,11 @@ def seed_gujranwala(db: Session) -> dict:
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    if settings.is_production or settings.is_staging:
+        raise SystemExit(
+            "Refusing to run seed_gujranwala against staging/production. "
+            "This script mutates demo campuses and is for local/dev only."
+        )
     init_db()
     db = SessionLocal()
     try:

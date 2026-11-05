@@ -65,12 +65,51 @@ def _build_slice(test_id: str, mode: str, part_id: Optional[str], question_type:
 
 
 def _remaining(row: ListeningAttempt) -> Optional[int]:
+    """Server-derived remaining time from started_at + duration (not client clock)."""
     if not row.timed:
         return None
     if row.status != "in_progress" or not row.started_at:
         return row.remaining_seconds
     elapsed = int((datetime.utcnow() - row.started_at).total_seconds())
     return max(0, int(row.duration_seconds or 0) - elapsed)
+
+
+def _time_expired(row: ListeningAttempt) -> bool:
+    rem = _remaining(row)
+    return rem is not None and rem <= 0
+
+
+def _rebuild_sliced(row: ListeningAttempt) -> dict:
+    if row.snapshot:
+        return row.snapshot
+    return _build_slice(
+        row.test_id,
+        row.mode,
+        (row.scope or {}).get("part_id"),
+        (row.scope or {}).get("question_type"),
+    )
+
+
+def _allowed_response_keys(sliced: dict) -> set[str]:
+    keys: set[str] = set()
+    for question in sliced.get("questions") or []:
+        if question.get("number") is not None:
+            keys.add(str(question["number"]))
+        if question.get("id"):
+            keys.add(str(question["id"]))
+    return keys
+
+
+def _merge_responses(row: ListeningAttempt, incoming: dict | None) -> dict:
+    """Merge only keys that belong to this attempt's question set."""
+    sliced = _rebuild_sliced(row)
+    allowed = _allowed_response_keys(sliced)
+    merged = dict(row.responses or {})
+    for key, value in (incoming or {}).items():
+        sk = str(key)
+        if sk in allowed:
+            merged[sk] = value
+    return merged
 
 
 def _policy(mode: str, timed: bool = True) -> dict:
@@ -93,7 +132,7 @@ def _assert_safe(payload: dict) -> None:
 
 
 def _payload(row: ListeningAttempt) -> dict:
-    sliced = row.snapshot or _build_slice(row.test_id, row.mode, row.scope.get("part_id"), row.scope.get("question_type"))
+    sliced = _rebuild_sliced(row)
     policy = _policy(row.mode, bool(row.timed))
     return {
         "attempt_id": row.id,
@@ -237,14 +276,16 @@ async def save_responses(
     row = _attempt_or_404(db, attempt_id, student_id)
     if row.status != "in_progress":
         raise HTTPException(400, "This attempt is already submitted.")
-    merged = dict(row.responses)
-    for key, value in (body.responses or {}).items():
-        merged[str(key)] = value
+    if _time_expired(row):
+        raise HTTPException(400, "Time is up. Submit your attempt.")
+    merged = _merge_responses(row, body.responses)
     row.responses = merged
-    if body.remaining_seconds is not None:
-        row.remaining_seconds = max(0, int(body.remaining_seconds))
+    # Always persist server-derived remaining; never allow client to extend time.
+    server_rem = _remaining(row)
+    if server_rem is not None:
+        row.remaining_seconds = server_rem
     db.commit()
-    return {"ok": True, "saved": len(merged)}
+    return {"ok": True, "saved": len(merged), "remaining_seconds": server_rem}
 
 
 @router.post("/listening/attempts/{attempt_id}/audio-start")
@@ -257,6 +298,13 @@ async def audio_start(
     row = _attempt_or_404(db, attempt_id, student_id)
     if row.status != "in_progress":
         raise HTTPException(400, "This attempt is already submitted.")
+    if _time_expired(row):
+        raise HTTPException(400, "Time is up. Submit your attempt.")
+    # Part must belong to this attempt's snapshot.
+    sliced = _rebuild_sliced(row)
+    part_ids = {str(p.get("id") or "") for p in (sliced.get("parts") or []) if p.get("id")}
+    if body.part_id not in part_ids:
+        raise HTTPException(400, "part_id is not part of this attempt.")
     policy = _policy(row.mode, bool(row.timed))
     plays = dict(row.playback)
     used = int(plays.get(body.part_id) or 0)
@@ -266,7 +314,12 @@ async def audio_start(
     plays[body.part_id] = used + 1
     row.playback = plays
     db.commit()
-    return {"ok": True, "plays_used": plays[body.part_id], "plays_allowed": allowed, "seeking_allowed": policy["seeking_allowed"]}
+    return {
+        "ok": True,
+        "plays_used": plays[body.part_id],
+        "plays_allowed": allowed,
+        "seeking_allowed": policy["seeking_allowed"],
+    }
 
 
 @router.post("/listening/attempts/{attempt_id}/submit")
@@ -279,11 +332,16 @@ async def submit_attempt(
     row = _attempt_or_404(db, attempt_id, student_id)
     if row.status == "submitted" and row.result:
         return row.result
-    merged = dict(row.responses)
-    for key, value in (body.responses or {}).items():
-        merged[str(key)] = value
+    if row.status != "in_progress":
+        raise HTTPException(400, "This attempt cannot be submitted.")
+    # After expiry, finalise with already-saved answers only (ignore late body edits).
+    if _time_expired(row):
+        merged = dict(row.responses or {})
+    else:
+        merged = _merge_responses(row, body.responses)
     row.responses = merged
-    sliced = row.snapshot or _build_slice(row.test_id, row.mode, row.scope.get("part_id"), row.scope.get("question_type"))
+    server_rem = _remaining(row)
+    sliced = _rebuild_sliced(row)
     result = grade_attempt(sliced, merged, bank.thresholds())
     if sliced.get("generated_by_ai") or row.mode in ("ai_part", "ai_full_mock"):
         result = await ai_review_short_answers(sliced, result)
@@ -292,6 +350,8 @@ async def submit_attempt(
     row.raw_score = result.get("raw_score")
     row.status = "submitted"
     row.submitted_at = datetime.utcnow()
+    if server_rem is not None:
+        row.remaining_seconds = server_rem
     db.commit()
     return result
 
@@ -349,7 +409,10 @@ async def listening_progress(
         .limit(20)
         .all()
     )
-    bands = [r.estimated_band for r in rows if r.estimated_band is not None]
+    from app.analytics.bands import average_bands, sanitize_band
+
+    bands = [sanitize_band(r.estimated_band) for r in rows]
+    bands = [b for b in bands if b is not None]
     type_stats: dict[str, dict] = {}
     for r in rows:
         for qtype, stats in ((r.result or {}).get("question_type_breakdown") or {}).items():
@@ -358,20 +421,32 @@ async def listening_progress(
             bucket["total"] += int(stats.get("total") or 0)
     return {
         "total_submitted": len(rows),
-        "average_band": round(sum(bands) / len(bands), 1) if bands else None,
+        "average_band": average_bands(bands),
         "recent_bands": bands[:10],
         "question_types": type_stats,
     }
 
 
+def _safe_media_name(filename: str) -> str:
+    """Basename only — blocks path traversal (.. / absolute paths)."""
+    safe = Path(str(filename or "")).name
+    if not safe or safe in {".", ".."} or ".." in safe:
+        raise HTTPException(404, "File not found.")
+    return safe
+
+
 @router.get("/listening/audio/{filename}")
 async def listening_audio(filename: str):
-    safe = Path(filename).name
+    """
+    Practice-pack audio is intentionally public static media (same policy as catalog).
+    Filenames are basename-only; no directory traversal.
+    """
+    safe = _safe_media_name(filename)
     candidates = [
         Path(settings.LISTENING_AUDIO_DIR) / safe,
         Path(settings.LISTENING_AUDIO_DIR).parent / "homework_audio" / safe,
     ]
-    path = next((p for p in candidates if p.exists()), None)
+    path = next((p for p in candidates if p.exists() and p.is_file()), None)
     if not path:
         path = materialize_archive_asset(safe, "audio")
     if not path:
@@ -385,10 +460,10 @@ async def listening_audio(filename: str):
 
 @router.get("/listening/maps/{filename}")
 async def listening_map(filename: str):
-    safe = Path(filename).name
+    safe = _safe_media_name(filename)
     path = Path(settings.LISTENING_MAP_DIR) / safe
     if not path.exists():
         path = materialize_archive_asset(safe, "image")
-    if not path or path.suffix.lower() not in {".svg", ".png", ".jpg", ".jpeg", ".webp"}:
+    if not path or Path(path).suffix.lower() not in {".svg", ".png", ".jpg", ".jpeg", ".webp"}:
         raise HTTPException(404, "Map not found.")
     return FileResponse(path, media_type=mimetypes.guess_type(safe)[0] or "application/octet-stream")

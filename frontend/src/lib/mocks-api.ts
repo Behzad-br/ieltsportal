@@ -1,7 +1,9 @@
 import { getCurrentStudent, homeworkAliasesForStudent } from '@/lib/mock-api';
-import { authHeaders, getAuthUser } from '@/lib/auth-api';
+import { authHeaders, clearAuthSession } from '@/lib/auth-api';
 import { apiBase } from '@/lib/api-base';
+import { messageFromErrorBody, parseJsonBody } from '@/lib/api-errors';
 import { DEMO_MODE } from '@/lib/demo-mode';
+import { getCanonicalStudentId, getCanonicalTeacherId } from '@/lib/identity';
 import {
   demoCreateMockAssignment,
   demoGetAttemptWork,
@@ -23,10 +25,9 @@ import {
 } from '@/lib/demo-mocks-store';
 
 function studentHeaders(): Record<string, string> {
-  const user = getAuthUser();
-  const student = getCurrentStudent();
-  const id = user?.role === 'student' ? user.id : student.id;
-  const aliases = homeworkAliasesForStudent(student);
+  const id = getCanonicalStudentId();
+  // Staging: backend ignores client aliases for JWT students; only send in demo sandbox.
+  const aliases = DEMO_MODE ? homeworkAliasesForStudent(getCurrentStudent()) : [];
   return {
     ...authHeaders(),
     ...(id ? { 'X-Student-Id': id } : {}),
@@ -35,9 +36,7 @@ function studentHeaders(): Record<string, string> {
 }
 
 function teacherHeaders(): Record<string, string> {
-  const user = getAuthUser();
-  const teacherId =
-    user?.role === 'teacher' ? user.id : localStorage.getItem('ielts-current-teacher-id') || '';
+  const teacherId = getCanonicalTeacherId();
   return {
     ...authHeaders(),
     ...(teacherId ? { 'X-Teacher-Id': teacherId } : {}),
@@ -54,18 +53,15 @@ async function api<T>(path: string, options?: RequestInit & { as?: 'teacher' | '
       ...(options?.headers as Record<string, string> | undefined),
     },
   });
+  if (res.status === 401) {
+    clearAuthSession();
+  }
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    const body = await parseJsonBody(res);
+    throw new Error(messageFromErrorBody(body, res.status));
   }
   if (res.status === 204) return {} as T;
-  return res.json();
+  return (await parseJsonBody(res)) as T;
 }
 
 export type MockLibraryItem = {
@@ -110,6 +106,10 @@ export type MockAssignment = {
   writing_band?: number | null;
   speaking_band?: number | null;
   overall_band?: number | null;
+  /** Single-skill mock: human label e.g. "Writing band" */
+  result_label?: string;
+  /** Single-skill mock: the band for mock_type only */
+  skill_band?: number | null;
   writing_feedback?: string | null;
 };
 

@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.auth.access import student_batch_from_db, users_in_branch
 from app.auth.deps import get_optional_user, resolve_student_id as get_student_id
 from app.auth.models import User
 from app.config import settings
@@ -48,16 +50,98 @@ def require_teacher(
 ) -> str:
     if user and user.role in {"teacher", "branch_admin", "super_admin"}:
         return user.id
-    expected = (settings.WRITING_ADMIN_TOKEN or "").strip()
-    provided = (x_admin_token or "").strip()
-    if expected and provided == expected:
-        return "teacher"
-    if settings.AUTH_LEGACY_HEADERS and not expected:
+    # Ops shared token — disabled in production unless explicitly opted in.
+    if settings.writing_admin_token_allowed:
+        expected = (settings.WRITING_ADMIN_TOKEN or "").strip()
+        provided = (x_admin_token or "").strip()
+        if expected and provided == expected:
+            return "teacher"
+    if settings.AUTH_LEGACY_HEADERS and not (settings.WRITING_ADMIN_TOKEN or "").strip():
         return "teacher"
     raise HTTPException(403, "Teacher authentication required.")
 
 
-def _row_public(row: HomeworkAssignment, extra: Optional[dict] = None) -> dict:
+_STUDENT_PAYLOAD_SECRET_KEYS = frozenset(
+    {
+        "answer",
+        "answer_key",
+        "answer_text",
+        "accepted_answers",
+        "answers",
+        "evidence",
+        "source_locator",
+        "explanation",
+        "correct",
+        "is_correct",
+        "correct_answer",
+        "model_answer",
+    }
+)
+
+
+def _student_safe_payload(value):
+    """Recursively strip scoring keys from homework payload before student GET."""
+    if isinstance(value, dict):
+        return {
+            k: _student_safe_payload(v)
+            for k, v in value.items()
+            if k not in _STUDENT_PAYLOAD_SECRET_KEYS
+        }
+    if isinstance(value, list):
+        return [_student_safe_payload(v) for v in value]
+    return value
+
+
+def _staff_user(
+    user: User | None = Depends(get_optional_user),
+    _: str = Depends(require_teacher),
+) -> User | None:
+    """JWT staff actor when present; None for shared-token / legacy teacher key."""
+    if user and user.role in {"teacher", "branch_admin", "super_admin"}:
+        return user
+    return None
+
+
+def _homework_touches_branch(db: Session, row: HomeworkAssignment, branch_id: str) -> bool:
+    if not branch_id:
+        return False
+    branch_students = set(users_in_branch(db, branch_id, role="student"))
+    if branch_students and set(row.student_ids) & branch_students:
+        return True
+    if not row.student_ids and row.batch_label:
+        return (
+            db.query(User)
+            .filter_by(role="student", branch_id=branch_id, batch=row.batch_label, is_active=True)
+            .first()
+            is not None
+        )
+    return False
+
+
+def _homework_visible_to_staff(db: Session, row: HomeworkAssignment, actor: User | None) -> bool:
+    """Teacher: own rows (+ legacy rows that touch own branch). BA: branch. SA/token: all."""
+    if actor is None or actor.role == "super_admin":
+        return True
+    if actor.role == "teacher":
+        if (row.created_by or "") == actor.id:
+            return True
+        # Legacy created_by="teacher"/empty: only if assignment touches this teacher's branch.
+        if (row.created_by or "") in {"teacher", ""}:
+            return _homework_touches_branch(db, row, actor.branch_id or "")
+        return False
+    if actor.role == "branch_admin":
+        if (row.created_by or "") == actor.id:
+            return True
+        return _homework_touches_branch(db, row, actor.branch_id or "")
+    return False
+
+
+def _require_homework_access(db: Session, row: HomeworkAssignment, actor: User | None) -> None:
+    if not _homework_visible_to_staff(db, row, actor):
+        raise HTTPException(403, "Not allowed for this assignment.")
+
+
+def _row_public(row: HomeworkAssignment, extra: Optional[dict] = None, *, for_student: bool = False) -> dict:
     payload = row.payload
     data = {
         "id": row.id,
@@ -68,26 +152,136 @@ def _row_public(row: HomeworkAssignment, extra: Optional[dict] = None) -> dict:
         "task_label": row.task_label,
         "question_type": row.question_type,
         "batch_label": row.batch_label,
-        "student_ids": row.student_ids,
         "deadline": row.deadline.isoformat() if row.deadline else None,
         "ai_grading_enabled": row.ai_grading_enabled == "1",
         "preview": payload.get("preview") or payload.get("prompt") or row.title,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
+    # Never expose peer student UUID lists to students.
+    if not for_student:
+        data["student_ids"] = row.student_ids
     if extra:
         data.update(extra)
     return data
 
 
-def _visible_to(row: HomeworkAssignment, student_id: str) -> bool:
+def _deadline_passed(row: HomeworkAssignment) -> bool:
+    """Server-clock late check. Naive and aware deadlines both supported."""
+    if not row.deadline:
+        return False
+    dl = row.deadline
+    now = datetime.utcnow()
+    if getattr(dl, "tzinfo", None) is not None:
+        dl = dl.replace(tzinfo=None)
+    return now > dl
+
+
+def _visible_to(db: Session, row: HomeworkAssignment, student_id: str, student_batch: str = "") -> bool:
     ids = row.student_ids
     if student_id in ids:
         return True
     if not ids and row.batch_label:
-        return True
+        # Entire-batch: DB batch match AND same campus as assignment creator.
+        if not student_batch or student_batch.strip().lower() != (row.batch_label or "").strip().lower():
+            return False
+        student = db.query(User).filter_by(id=student_id).first()
+        student_branch = (student.branch_id or "").strip() if student else ""
+        creator = db.query(User).filter_by(id=row.created_by).first() if row.created_by else None
+        if creator and (creator.branch_id or "").strip():
+            return (creator.branch_id or "").strip() == student_branch and bool(student_branch)
+        # Legacy token-created rows without a real creator user.
+        if settings.AUTH_LEGACY_HEADERS:
+            return True
+        return False
     return student_id == settings.DEFAULT_STUDENT_ID and (
         not ids or "local" in ids or settings.DEFAULT_STUDENT_ID in ids
     )
+
+
+def _reuse_open_session(db: Session, sub: HomeworkSubmission) -> Optional[dict]:
+    """Return existing in-progress skill session payload without spawning a duplicate."""
+    ref = sub.attempt_ref
+    kind = sub.attempt_kind
+    if not ref or not kind:
+        return None
+    if kind == "writing-question":
+        from app.writing.models import WritingAttempt
+
+        a = db.query(WritingAttempt).filter_by(id=ref).first()
+        if a and a.status == "in_progress" and a.student_id == sub.student_id:
+            return {"kind": kind, "questionId": a.question_id, "ref": ref}
+        return None
+    if kind == "writing-mock":
+        from app.writing.models import WritingMockSession
+
+        m = db.query(WritingMockSession).filter_by(id=ref).first()
+        if m and m.status == "in_progress" and m.student_id == sub.student_id:
+            return {"kind": kind, "mockId": ref, "ref": ref}
+        return None
+    if kind == "reading":
+        a = db.query(ReadingAttempt).filter_by(id=ref).first()
+        if a and a.status == "in_progress" and a.student_id == sub.student_id:
+            return {"kind": kind, "attemptId": ref, "ref": ref}
+        return None
+    if kind == "listening":
+        a = db.query(ListeningAttempt).filter_by(id=ref).first()
+        if a and a.status == "in_progress" and a.student_id == sub.student_id:
+            return {"kind": kind, "attemptId": ref, "ref": ref}
+        return None
+    if kind == "speaking":
+        from app.speaking.models import TestSession
+
+        s = db.query(TestSession).filter_by(id=ref).first()
+        if s and s.status == "in_progress" and s.student_id == sub.student_id:
+            return {"kind": kind, "sessionId": ref, "ref": ref}
+        return None
+    return None
+
+
+def _band_from_linked_attempt(db: Session, sub: HomeworkSubmission) -> Optional[float]:
+    """Server-stored skill band only — never trust client bands; require ownership."""
+    ref = sub.attempt_ref
+    kind = sub.attempt_kind or ""
+    owner = sub.student_id
+    if not ref or not owner:
+        return None
+    try:
+        if kind.startswith("writing"):
+            from app.writing.models import WritingAttempt, WritingMockSession
+
+            if kind == "writing-mock":
+                m = db.query(WritingMockSession).filter_by(id=ref).first()
+                if not m or m.student_id != owner:
+                    return None
+                return float(m.overall_band) if m.overall_band is not None else None
+            a = db.query(WritingAttempt).filter_by(id=ref).first()
+            if not a or a.student_id != owner:
+                return None
+            if a.final_band is not None:
+                return float(a.final_band)
+            if a.estimated_band is not None:
+                return float(a.estimated_band)
+            return None
+        if kind == "reading":
+            a = db.query(ReadingAttempt).filter_by(id=ref).first()
+            if not a or a.student_id != owner:
+                return None
+            return float(a.estimated_band) if a.estimated_band is not None else None
+        if kind == "listening":
+            a = db.query(ListeningAttempt).filter_by(id=ref).first()
+            if not a or a.student_id != owner:
+                return None
+            return float(a.estimated_band) if a.estimated_band is not None else None
+        if kind == "speaking":
+            from app.speaking.models import TestSession
+
+            s = db.query(TestSession).filter_by(id=ref).first()
+            if not s or s.student_id != owner:
+                return None
+            return float(s.estimated_band) if s.estimated_band is not None else None
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 @router.get("/homework/teacher/bank")
@@ -266,18 +460,54 @@ async def upload_audio(
     return {"filename": name, "url": f"/api/homework/audio/{name}"}
 
 
+def _homework_audio_allowed(db: Session, user: User, filename: str) -> bool:
+    """Staff may fetch upload previews; students only if assigned homework references the file."""
+    if user.role in {"teacher", "branch_admin", "super_admin"}:
+        if user.role == "super_admin":
+            return True
+        # Branch-scoped staff: any assignment that touches their campus, or they created.
+        rows = (
+            db.query(HomeworkAssignment)
+            .filter(HomeworkAssignment.payload_json.isnot(None))
+            .filter(HomeworkAssignment.payload_json.contains(filename))
+            .all()
+        )
+        for row in rows:
+            if _homework_visible_to_staff(db, row, user):
+                return True
+        return False
+    if user.role != "student":
+        return False
+    batch = student_batch_from_db(db, user.id)
+    rows = (
+        db.query(HomeworkAssignment)
+        .filter(HomeworkAssignment.payload_json.isnot(None))
+        .filter(HomeworkAssignment.payload_json.contains(filename))
+        .all()
+    )
+    return any(_visible_to(db, row, user.id, batch) for row in rows)
+
+
 @router.get("/homework/audio/{filename}")
 async def homework_audio(
     filename: str,
+    db: Session = Depends(get_db),
     user: User | None = Depends(get_optional_user),
 ):
     from fastapi.responses import FileResponse
 
-    if user is None and not settings.AUTH_LEGACY_HEADERS:
-        raise HTTPException(401, "Authentication required.")
+    if user is None:
+        if settings.AUTH_LEGACY_HEADERS:
+            # Sandbox/tests only — no object ACL under legacy.
+            pass
+        else:
+            raise HTTPException(401, "Authentication required.")
     safe = Path(filename).name
     if safe != filename or ".." in filename:
         raise HTTPException(400, "Invalid filename.")
+    if user is not None and not settings.AUTH_LEGACY_HEADERS:
+        if not _homework_audio_allowed(db, user, safe):
+            raise HTTPException(404, "Audio not found.")
     path = Path(settings.HOMEWORK_AUDIO_DIR) / safe
     if not path.exists() or not path.is_file():
         raise HTTPException(404, "Audio not found.")
@@ -285,16 +515,59 @@ async def homework_audio(
         path.resolve().relative_to(Path(settings.HOMEWORK_AUDIO_DIR).resolve())
     except ValueError:
         raise HTTPException(400, "Invalid filename.")
-    return FileResponse(path)
+    return FileResponse(path, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
 
 
 @router.post("/homework/teacher/assignments")
-async def create_assignment(body: dict, db: Session = Depends(get_db), _: str = Depends(require_teacher)):
+async def create_assignment(
+    body: dict,
+    db: Session = Depends(get_db),
+    teacher_key: str = Depends(require_teacher),
+    actor: User | None = Depends(_staff_user),
+):
     deadline = body.get("deadline")
     parsed = datetime.fromisoformat(deadline.replace("Z", "+00:00")) if deadline else None
-    student_ids = body.get("student_ids") or []
+    student_ids = [str(s).strip() for s in (body.get("student_ids") or []) if str(s).strip()]
+    # Staging: never inject "local"/DEFAULT_STUDENT_ID into new assignments.
+    # Legacy tests with AUTH_LEGACY_HEADERS may still use DEFAULT for empty entire-batch.
     if body.get("assignment_target") == "entire" or not student_ids:
-        student_ids = list({*(student_ids or []), "local", settings.DEFAULT_STUDENT_ID})
+        if settings.AUTH_LEGACY_HEADERS:
+            student_ids = list({*student_ids, settings.DEFAULT_STUDENT_ID})
+        elif not student_ids:
+            # Entire-batch without explicit IDs: store empty list + batch_label (Phase 7 will normalize).
+            student_ids = []
+    # Reject blocked legacy ids on new writes when staging-strict.
+    if not settings.AUTH_LEGACY_HEADERS:
+        from app.auth.identity import is_blocked_legacy_id
+
+        bad = [s for s in student_ids if is_blocked_legacy_id(s)]
+        if bad:
+            raise HTTPException(400, f"Invalid student ids for staging: {', '.join(bad)}")
+    # Teachers/BA may only assign students in their branch.
+    if actor and actor.role in {"teacher", "branch_admin"} and student_ids:
+        allowed = set(users_in_branch(db, actor.branch_id or "", role="student"))
+        foreign = [sid for sid in student_ids if sid not in allowed]
+        if foreign:
+            raise HTTPException(403, "Cannot assign students outside your branch.")
+    # Entire-batch labels must exist on the actor's campus (no cross-branch batch names).
+    batch_label = (body.get("batch_label") or "").strip()
+    if actor and actor.role in {"teacher", "branch_admin"} and batch_label:
+        from app.auth.models import Batch
+
+        on_campus = (
+            db.query(Batch)
+            .filter_by(branch_id=actor.branch_id or "", name=batch_label)
+            .first()
+            is not None
+        )
+        has_students = (
+            db.query(User)
+            .filter_by(role="student", branch_id=actor.branch_id or "", batch=batch_label, is_active=True)
+            .first()
+            is not None
+        )
+        if not on_campus and not has_students:
+            raise HTTPException(400, "batch_label is not on your campus.")
     row = HomeworkAssignment(
         title=body.get("title") or f"{body.get('module')} homework",
         module=(body.get("module") or "writing").lower(),
@@ -305,7 +578,7 @@ async def create_assignment(body: dict, db: Session = Depends(get_db), _: str = 
         batch_label=body.get("batch_label"),
         deadline=parsed,
         ai_grading_enabled="1" if body.get("ai_grading_enabled") else "0",
-        created_by="teacher",
+        created_by=(actor.id if actor else teacher_key),
     )
     row.student_ids = student_ids
     row.payload = body.get("payload") or {}
@@ -316,10 +589,16 @@ async def create_assignment(body: dict, db: Session = Depends(get_db), _: str = 
 
 
 @router.get("/homework/teacher/assignments")
-async def list_teacher_assignments(db: Session = Depends(get_db), _: str = Depends(require_teacher)):
+async def list_teacher_assignments(
+    db: Session = Depends(get_db),
+    _: str = Depends(require_teacher),
+    actor: User | None = Depends(_staff_user),
+):
     rows = db.query(HomeworkAssignment).order_by(HomeworkAssignment.created_at.desc()).all()
     out = []
     for row in rows:
+        if not _homework_visible_to_staff(db, row, actor):
+            continue
         subs = db.query(HomeworkSubmission).filter_by(assignment_id=row.id).all()
         submitted = len([s for s in subs if s.status in ("submitted", "reviewed", "published")])
         out.append(_row_public(row, extra={"submitted": submitted, "assigned": max(len(row.student_ids), 1)}))
@@ -327,21 +606,38 @@ async def list_teacher_assignments(db: Session = Depends(get_db), _: str = Depen
 
 
 @router.delete("/homework/teacher/assignments/{assignment_id}")
-async def delete_assignment(assignment_id: str, db: Session = Depends(get_db), _: str = Depends(require_teacher)):
+async def delete_assignment(
+    assignment_id: str,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_teacher),
+    actor: User | None = Depends(_staff_user),
+):
     row = db.query(HomeworkAssignment).filter_by(id=assignment_id).first()
     if not row:
         raise HTTPException(404, "Assignment not found.")
-    db.query(HomeworkSubmission).filter_by(assignment_id=assignment_id).delete()
+    _require_homework_access(db, row, actor)
+    # Preserve academic history — refuse hard delete when submissions exist.
+    if db.query(HomeworkSubmission).filter_by(assignment_id=assignment_id).count():
+        raise HTTPException(
+            409,
+            "Cannot delete homework with submissions. Archive by leaving it inactive for new starts.",
+        )
     db.delete(row)
     db.commit()
     return {"ok": True}
 
 
 @router.get("/homework/teacher/assignments/{assignment_id}/submissions")
-async def teacher_submissions(assignment_id: str, db: Session = Depends(get_db), _: str = Depends(require_teacher)):
+async def teacher_submissions(
+    assignment_id: str,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_teacher),
+    actor: User | None = Depends(_staff_user),
+):
     row = db.query(HomeworkAssignment).filter_by(id=assignment_id).first()
     if not row:
         raise HTTPException(404, "Assignment not found.")
+    _require_homework_access(db, row, actor)
     subs = db.query(HomeworkSubmission).filter_by(assignment_id=assignment_id).all()
     return {
         "assignment": _row_public(row),
@@ -363,12 +659,24 @@ async def teacher_submissions(assignment_id: str, db: Session = Depends(get_db),
 
 
 @router.post("/homework/teacher/submissions/{submission_id}/review")
-async def teacher_review(submission_id: str, body: dict, db: Session = Depends(get_db), _: str = Depends(require_teacher)):
+async def teacher_review(
+    submission_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_teacher),
+    actor: User | None = Depends(_staff_user),
+):
     sub = db.query(HomeworkSubmission).filter_by(id=submission_id).first()
     if not sub:
         raise HTTPException(404, "Submission not found.")
+    parent = db.query(HomeworkAssignment).filter_by(id=sub.assignment_id).first()
+    if not parent:
+        raise HTTPException(404, "Assignment not found.")
+    _require_homework_access(db, parent, actor)
     if "teacher_band" in body:
-        sub.teacher_band = float(body["teacher_band"]) if body["teacher_band"] is not None else None
+        from app.ielts_bands import parse_ielts_band
+
+        sub.teacher_band = parse_ielts_band(body["teacher_band"], field="teacher_band")
     if "teacher_comments" in body:
         sub.teacher_comments = body["teacher_comments"]
     sub.status = "published" if body.get("publish") else "reviewed"
@@ -388,21 +696,34 @@ async def teacher_review(submission_id: str, body: dict, db: Session = Depends(g
 
 
 @router.get("/homework/teacher/student-record")
-async def teacher_student_record(ids: str = "", db: Session = Depends(get_db), _: str = Depends(require_teacher)):
+async def teacher_student_record(
+    ids: str = "",
+    db: Session = Depends(get_db),
+    _: str = Depends(require_teacher),
+    actor: User | None = Depends(_staff_user),
+):
     aliases = [item.strip() for item in (ids or "").split(",") if item.strip()]
     if not aliases:
         return {"submitted": [], "in_progress": [], "pending": []}
+    # Teachers/BA may only query students in their branch.
+    if actor and actor.role in {"teacher", "branch_admin"}:
+        allowed = set(users_in_branch(db, actor.branch_id or "", role="student"))
+        aliases = [a for a in aliases if a in allowed]
+        if not aliases:
+            return {"submitted": [], "in_progress": [], "pending": []}
     rows = db.query(HomeworkAssignment).order_by(HomeworkAssignment.created_at.desc()).all()
     submitted: list[dict] = []
     in_progress: list[dict] = []
     pending: list[dict] = []
     for row in rows:
+        if not _homework_visible_to_staff(db, row, actor):
+            continue
         sub = (
             db.query(HomeworkSubmission)
             .filter(HomeworkSubmission.assignment_id == row.id, HomeworkSubmission.student_id.in_(aliases))
             .first()
         )
-        assigned = any(_visible_to(row, sid) for sid in aliases) or sub is not None
+        assigned = any(_visible_to(db, row, sid, student_batch_from_db(db, sid)) for sid in aliases) or sub is not None
         if not assigned:
             continue
         extra = {
@@ -425,10 +746,11 @@ async def teacher_student_record(ids: str = "", db: Session = Depends(get_db), _
 
 @router.get("/homework/student")
 async def student_list(db: Session = Depends(get_db), student_id: str = Depends(get_student_id)):
+    batch = student_batch_from_db(db, student_id)
     rows = db.query(HomeworkAssignment).order_by(HomeworkAssignment.created_at.desc()).all()
     items = []
     for row in rows:
-        if not _visible_to(row, student_id):
+        if not _visible_to(db, row, student_id, batch):
             continue
         sub = (
             db.query(HomeworkSubmission)
@@ -444,43 +766,102 @@ async def student_list(db: Session = Depends(get_db), student_id: str = Depends(
                 "reviewed": "Completed",
                 "published": "Completed",
             }.get(sub.status, "Pending")
-        items.append(_row_public(row, extra={"status": status, "submission_id": sub.id if sub else None}))
+        items.append(
+            _row_public(
+                row,
+                extra={"status": status, "submission_id": sub.id if sub else None},
+                for_student=True,
+            )
+        )
     return {"assignments": items}
 
 
 @router.get("/homework/student/{assignment_id}")
 async def student_detail(assignment_id: str, db: Session = Depends(get_db), student_id: str = Depends(get_student_id)):
     row = db.query(HomeworkAssignment).filter_by(id=assignment_id).first()
-    if not row or not _visible_to(row, student_id):
+    if not row or not _visible_to(db, row, student_id, student_batch_from_db(db, student_id)):
         raise HTTPException(404, "Assignment not found.")
     sub = db.query(HomeworkSubmission).filter_by(assignment_id=row.id, student_id=student_id).first()
+    published = bool(sub and sub.status == "published")
+    show_estimate = bool(sub and sub.status in ("submitted", "reviewed", "published"))
     return _row_public(
         row,
         extra={
             "status": sub.status if sub else "pending",
             "submission_id": sub.id if sub else None,
-            "payload": {k: v for k, v in row.payload.items() if k != "answer_key"},
+            # Teacher score/comments only after publish — reviewed is staff-only draft.
+            "teacher_band": sub.teacher_band if published else None,
+            "teacher_comments": sub.teacher_comments if published else None,
+            "estimated_band": sub.estimated_band if show_estimate else None,
+            "result_pending": bool(sub and sub.status in ("submitted", "reviewed") and not published),
+            "band_source": (
+                "teacher"
+                if published and sub.teacher_band is not None
+                else ("estimated" if show_estimate and sub.estimated_band is not None else None)
+            ),
+            "payload": _student_safe_payload(row.payload),
         },
+        for_student=True,
     )
 
 
 @router.post("/homework/student/{assignment_id}/start")
 async def student_start(assignment_id: str, db: Session = Depends(get_db), student_id: str = Depends(get_student_id)):
     row = db.query(HomeworkAssignment).filter_by(id=assignment_id).first()
-    if not row or not _visible_to(row, student_id):
+    if not row or not _visible_to(db, row, student_id, student_batch_from_db(db, student_id)):
         raise HTTPException(404, "Assignment not found.")
     sub = db.query(HomeworkSubmission).filter_by(assignment_id=row.id, student_id=student_id).first()
+    if sub and sub.status in ("submitted", "reviewed", "published"):
+        raise HTTPException(409, "This homework is already submitted.")
+    if _deadline_passed(row) and (not sub or sub.status not in ("in_progress",)):
+        raise HTTPException(403, "The deadline has passed.")
+
     if not sub:
-        sub = HomeworkSubmission(assignment_id=row.id, student_id=student_id, status="in_progress", started_at=datetime.utcnow())
+        sub = HomeworkSubmission(
+            assignment_id=row.id,
+            student_id=student_id,
+            status="in_progress",
+            started_at=datetime.utcnow(),
+        )
         db.add(sub)
-        db.flush()
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            # Concurrent start won the unique (assignment_id, student_id) race.
+            sub = (
+                db.query(HomeworkSubmission)
+                .filter_by(assignment_id=row.id, student_id=student_id)
+                .first()
+            )
+            if not sub:
+                raise HTTPException(409, "Could not start homework; please retry.")
+            if sub.status in ("submitted", "reviewed", "published"):
+                raise HTTPException(409, "This homework is already submitted.")
+
     else:
         sub.status = "in_progress"
         sub.started_at = sub.started_at or datetime.utcnow()
+
+    # Resume existing in-progress skill attempt — do not spawn duplicates.
+    reused = _reuse_open_session(db, sub)
+    if reused:
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "Homework submission conflict; please retry.")
+        db.refresh(sub)
+        return {"submission_id": sub.id, **reused}
+
     session = await _open_skill(db, row, student_id)
     sub.attempt_kind = session["kind"]
     sub.attempt_ref = session.get("ref")
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Homework submission conflict; please retry.")
     db.refresh(sub)
     return {"submission_id": sub.id, **session}
 
@@ -490,14 +871,32 @@ async def student_complete(submission_id: str, body: dict, db: Session = Depends
     sub = db.query(HomeworkSubmission).filter_by(id=submission_id, student_id=student_id).first()
     if not sub:
         raise HTTPException(404, "Submission not found.")
+    # Idempotent: already finalised — never leak unpublished teacher scores.
+    if sub.status in ("submitted", "reviewed", "published"):
+        published = sub.status == "published"
+        return {
+            "id": sub.id,
+            "status": sub.status,
+            "estimated_band": sub.estimated_band,
+            "teacher_band": sub.teacher_band if published else None,
+            "result_pending": not published,
+        }
+    parent = db.query(HomeworkAssignment).filter_by(id=sub.assignment_id).first()
+    if parent and _deadline_passed(parent) and sub.status != "in_progress":
+        raise HTTPException(403, "The deadline has passed.")
+    # Allow completing an in-progress attempt after deadline (started on time).
+    # Never accept client attempt_ref when unset — must come from /start.
+    if body.get("attempt_ref"):
+        if not sub.attempt_ref or body["attempt_ref"] != sub.attempt_ref:
+            raise HTTPException(400, "attempt_ref does not match this homework submission.")
+    # Ignore client estimated_band entirely — scores come from linked skill only.
+    server_band = _band_from_linked_attempt(db, sub)
+    if server_band is not None:
+        sub.estimated_band = server_band
     sub.status = "submitted"
     sub.submitted_at = datetime.utcnow()
-    if body.get("estimated_band") is not None:
-        sub.estimated_band = float(body["estimated_band"])
-    if body.get("attempt_ref"):
-        sub.attempt_ref = body["attempt_ref"]
     db.commit()
-    return {"id": sub.id, "status": sub.status}
+    return {"id": sub.id, "status": sub.status, "estimated_band": sub.estimated_band}
 
 
 def _map_writing_type(label: str, task_number: int) -> Optional[str]:
@@ -642,6 +1041,7 @@ async def _open_skill(db: Session, row: HomeworkAssignment, student_id: str) -> 
                 test_type,
                 task1_id=payload.get("task1_id"),
                 task2_id=payload.get("task2_id"),
+                commit=False,
             )
             return {"kind": "writing-mock", "mockId": mock.id, "ref": mock.id}
         qid = payload.get("question_id")
@@ -665,7 +1065,7 @@ async def _open_skill(db: Session, row: HomeworkAssignment, student_id: str) -> 
         if not qid:
             raise HTTPException(400, "No writing question on this assignment.")
         q = db.query(WritingQuestion).filter_by(id=qid).first()
-        attempt = writing_service.start_attempt(db, student_id, q)
+        attempt = writing_service.start_attempt(db, student_id, q, commit=False)
         return {"kind": "writing-question", "questionId": qid, "ref": attempt.id}
 
     if module == "reading":
@@ -758,8 +1158,14 @@ async def _open_skill(db: Session, row: HomeworkAssignment, student_id: str) -> 
             "part3": [payload["prompt"]] if practice_part == 3 else ["Why is this important?"],
         }
         mode = "stored"
-    session, _qs = speaking_session.create_session(db, mode, test_data, practice_part=practice_part)
-    db.commit()
+    session, _qs = speaking_session.create_session(
+        db,
+        mode,
+        test_data,
+        practice_part=practice_part,
+        student_id=student_id,
+        commit=False,
+    )
     return {"kind": "speaking", "sessionId": session.id, "ref": session.id}
 
 

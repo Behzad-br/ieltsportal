@@ -524,7 +524,15 @@ function ResultView({
   );
 }
 
-export default function ListeningRoom({ attemptId, onExit }: { attemptId: string; onExit?: () => void }) {
+export default function ListeningRoom({
+  attemptId,
+  onExit,
+  onSubmitted,
+}: {
+  attemptId: string;
+  onExit?: () => void;
+  onSubmitted?: () => void;
+}) {
   const [payload, setPayload] = useState<ListeningAttemptPayload | null>(null);
   const [responses, setResponses] = useState<Record<string, string | string[]>>({});
   const [partId, setPartId] = useState("");
@@ -576,6 +584,7 @@ export default function ListeningRoom({ attemptId, onExit }: { attemptId: string
       const next = await submitListeningAttempt(attemptId, responses);
       setResult(next);
       saveLocalPracticeResult("Listening", payload?.test.id || "", next.estimated_band ?? undefined);
+      onSubmitted?.();
     } catch (e: any) {
       submitted.current = false;
       setError(e.message || "Submit failed");
@@ -583,7 +592,7 @@ export default function ListeningRoom({ attemptId, onExit }: { attemptId: string
       setSubmitting(false);
       setConfirm(false);
     }
-  }, [attemptId, responses, payload?.test.id]);
+  }, [attemptId, responses, payload?.test.id, onSubmitted]);
 
   useEffect(() => {
     if (!payload?.timed) return;

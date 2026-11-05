@@ -93,8 +93,10 @@ export default function MockBriefing({ assignmentId }: { assignmentId: string })
         {item.inbox_status === 'upcoming' && <p className="mt-4 text-sm text-muted-foreground">This mock is not available yet.</p>}
         {item.inbox_status === 'results' && (
           <div className="mt-5 text-sm">
-            <p>Listening {item.listening_band ?? '—'} · Reading {item.reading_band ?? '—'} · Writing {item.writing_band ?? '—'} · Speaking {item.speaking_band ?? '—'}</p>
-            <p className="mt-2 font-display text-2xl font-bold">Overall {item.overall_band ?? '—'}</p>
+            <p className="font-display text-2xl font-bold">
+              {item.result_label || 'Skill band'} {item.skill_band ?? item.overall_band ?? '—'}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">Single-skill mock result (not a four-skill IELTS overall).</p>
             {item.writing_feedback && <p className="mt-3 text-muted-foreground">{item.writing_feedback}</p>}
           </div>
         )}

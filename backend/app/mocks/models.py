@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, UniqueConstraint
 
 from app.database import Base
 
@@ -79,6 +79,13 @@ class MockAssignment(Base):
 
 class MockAssignmentStudent(Base):
     __tablename__ = "mock_assignment_students"
+    __table_args__ = (
+        UniqueConstraint(
+            "assignment_id",
+            "student_id",
+            name="uq_mock_assignment_students_assignment_student",
+        ),
+    )
 
     id = Column(String, primary_key=True, default=_uuid)
     assignment_id = Column(String, nullable=False, index=True)

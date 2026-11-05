@@ -38,32 +38,35 @@ export default function SuperAdminSettings() {
     setToast('LMS preferences saved.');
   };
 
-  const saveProfile = (e: FormEvent) => {
+  const saveProfile = async (e: FormEvent) => {
     e.preventDefault();
     const nextName = fullName.trim();
     if (nextName.length < 2) { setProfileError('Enter your display name.'); return; }
 
-    const latest = getCurrentSuperAdmin();
-    const patch: { fullName: string; password?: string } = { fullName: nextName };
+    const patch: { fullName: string; password?: string; currentPassword?: string } = { fullName: nextName };
     if (currentPassword || newPassword || confirmPassword) {
       if (!currentPassword) { setProfileError('Enter your current password to change it.'); return; }
-      if (currentPassword !== (latest.password || '')) { setProfileError('Current password is incorrect.'); return; }
       if (newPassword.length < 6) { setProfileError('New password must be at least 6 characters.'); return; }
       if (newPassword !== confirmPassword) { setProfileError('Passwords do not match.'); return; }
       if (newPassword === currentPassword) { setProfileError('Choose a new password that is different from your current one.'); return; }
       patch.password = newPassword;
+      patch.currentPassword = currentPassword;
     }
 
-    const saved = updateCurrentSuperAdminAccount(patch);
-    if (!saved) { setProfileError('Could not save your account.'); return; }
-    setFullName(saved.fullName);
-    setCurrentPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
-    setProfileError('');
-    setToast(patch.password
-      ? 'Name and password saved. Use the new password next time you sign in.'
-      : 'Your display name has been saved.');
+    try {
+      const saved = await updateCurrentSuperAdminAccount(patch);
+      if (!saved) { setProfileError('Could not save your account.'); return; }
+      setFullName(saved.fullName);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setProfileError('');
+      setToast(patch.password
+        ? 'Name and password saved. Use the new password next time you sign in.'
+        : 'Your display name has been saved.');
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : 'Could not save your account.');
+    }
   };
 
   return (

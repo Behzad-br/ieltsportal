@@ -225,7 +225,10 @@ export default function HomeworkComposer() {
         question_type: method === 'bank' ? (scope === 'full_mock' ? 'Full test' : task) : questionType,
         batch_label: targetBatch,
         assignment_target: assignmentTarget,
-        student_ids: assignmentTarget === 'specific' ? selectedStudents.map(id => id === 's1' ? 'local' : id) : ['local'],
+        // Canonical auth_users.id only — never inject "local"/"s1".
+        student_ids: assignmentTarget === 'specific'
+          ? selectedStudents.filter((id) => id && id !== 'local' && id !== 's1' && !String(id).startsWith('demo-'))
+          : [],
         deadline: deadline || undefined,
         ai_grading_enabled: gradingMethod === 'auto',
         payload,

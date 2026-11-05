@@ -78,8 +78,8 @@ export function TeacherStudentDetailPage({ studentId }: { studentId: string }) {
   const [error, setError] = useState('');
   const [fullName, setFullName] = useState(account?.fullName || listed?.name || '');
   const [studentIdValue, setStudentIdValue] = useState(account?.username || account?.studentId || listed?.username || '');
-  const [password, setPassword] = useState(account?.password || 'password123');
-  const [confirmPassword, setConfirmPassword] = useState(account?.password || 'password123');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [batch, setBatch] = useState(account?.batch || listed?.batch || '');
   const [live, setLive] = useState<{
     submitted: StudentHomeworkRecordItem[];
@@ -174,35 +174,42 @@ export function TeacherStudentDetailPage({ studentId }: { studentId: string }) {
         band: listed?.band ? `Band ${listed.band.toFixed(1)}` : undefined,
       }));
 
-  const save = (e: FormEvent) => {
+  const save = async (e: FormEvent) => {
     e.preventDefault();
     const loginId = studentIdValue.trim();
     if (fullName.trim().length < 2) { setError('Enter the student name.'); return; }
     if (loginId.length < 3) { setError('Student ID must be at least 3 characters.'); return; }
-    if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    if (password && password.length < 6) { setError('Password must be at least 6 characters (or leave blank to keep current).'); return; }
     if (password !== confirmPassword) { setError('Passwords do not match.'); return; }
     const taken = listStudentAccounts().some((s) =>
       s.id !== studentId && (s.username || '').toLowerCase() === loginId.toLowerCase()
     );
     if (taken) { setError('This student ID is already used.'); return; }
     const email = (account?.email || listed?.email || `${loginId.toLowerCase()}@student.fti.local`).trim();
-    updateStudentAccount(studentId, {
-      fullName: fullName.trim(),
-      name: fullName.trim(),
-      username: loginId,
-      studentId: loginId,
-      email,
-      password,
-      batch,
-      band: account?.band || (listed?.band ? String(listed.band) : ''),
-      trend: listed?.trend || account?.trend || '—',
-      status: listed?.status || account?.status || 'Active',
-      lastActive: listed?.lastActive || account?.lastActive || 'Just updated',
-      branchId: account?.branchId || 'lahore',
-      branchName: account?.branchName || 'Lahore Branch',
-    });
     setError('');
-    setToast('Login saved. Share this student ID and password with the learner.');
+    try {
+      const patch: Record<string, string> = {
+        fullName: fullName.trim(),
+        name: fullName.trim(),
+        username: loginId,
+        studentId: loginId,
+        email,
+        batch,
+        band: account?.band || (listed?.band ? String(listed.band) : ''),
+        trend: listed?.trend || account?.trend || '—',
+        status: listed?.status || account?.status || 'Active',
+        lastActive: listed?.lastActive || account?.lastActive || 'Just updated',
+        branchId: account?.branchId || '',
+        branchName: account?.branchName || '',
+      };
+      if (password) patch.password = password;
+      await updateStudentAccount(studentId, patch);
+      setPassword('');
+      setConfirmPassword('');
+      setToast('Login saved. Share this student ID with the learner.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save student.');
+    }
   };
 
   return (
@@ -289,10 +296,14 @@ export function TeacherStudentDetailPage({ studentId }: { studentId: string }) {
             <button
               type="button"
               className="inline-flex h-11 items-center gap-2 rounded-lg border border-red-200 px-4 text-sm font-semibold text-red-700 hover:bg-red-50"
-              onClick={() => {
+              onClick={async () => {
                 if (!confirm(`Remove login for ${fullName || 'this student'}? They will no longer be able to sign in.`)) return;
-                removeStudentAccount(studentId, account?.email || listed?.email);
-                setLocation('/teacher/students');
+                try {
+                  await removeStudentAccount(studentId, account?.email || listed?.email);
+                  setLocation('/teacher/students');
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : 'Could not remove student.');
+                }
               }}
             >
               <Trash2 size={15} /> Remove credentials

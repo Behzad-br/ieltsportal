@@ -1,5 +1,7 @@
-import { authHeaders, getAuthUser } from "@/lib/auth-api";
+import { authHeaders, clearAuthSession } from "@/lib/auth-api";
 import { apiBase } from "@/lib/api-base";
+import { messageFromErrorBody, parseJsonBody } from "@/lib/api-errors";
+import { getCanonicalStudentId } from "@/lib/identity";
 import {
   WritingAttempt,
   WritingMock,
@@ -9,11 +11,10 @@ import {
 
 export function getStudentId(): string {
   if (typeof window === "undefined") return "";
-  const user = getAuthUser();
-  if (user?.role === "student") return user.id;
-  return localStorage.getItem("writing_student_id") || "";
+  return getCanonicalStudentId();
 }
 
+/** Ops-only WRITING_ADMIN_TOKEN fallback. Prefer JWT for teachers. Never put LLM API keys here. */
 export function getAdminToken(): string {
   if (typeof window === "undefined") return "";
   return localStorage.getItem("writing_admin_token") || "";
@@ -34,18 +35,13 @@ async function request<T>(path: string, options?: RequestInit & { admin?: boolea
   } catch {
     throw new Error("Cannot connect to server. Make sure the backend is running.");
   }
+  if (res.status === 401) clearAuthSession();
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const body = await parseJsonBody(res);
+    throw new Error(messageFromErrorBody(body, res.status));
   }
   if (res.status === 204) return {} as T;
-  return res.json();
+  return (await parseJsonBody(res)) as T;
 }
 
 export async function listWritingQuestions(params: Record<string, string | number | boolean | undefined>) {

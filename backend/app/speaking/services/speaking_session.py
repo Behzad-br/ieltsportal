@@ -50,12 +50,15 @@ def create_session(
     test_data: dict,
     practice_part: Optional[int] = None,
     student_id: Optional[str] = None,
+    *,
+    commit: bool = True,
 ) -> tuple[TestSession, list[Question]]:
     """
     Create a new TestSession and Question rows from a test data dict.
 
     practice_part: 1, 2, or 3 to store only that part. None = full mock (all parts).
     student_id: authenticated owner of the session (required in production).
+    commit=False: flush only — for homework/mock orchestration that owns the outer txn.
     """
     if practice_part is not None and practice_part not in (1, 2, 3):
         raise ValueError("practice_part must be 1, 2, 3, or None")
@@ -115,11 +118,14 @@ def create_session(
             questions.append(q)
 
     if not questions:
-        db.rollback()
+        # Do not rollback here — outer homework/mock transactions own the session.
         raise ValueError("No questions available for this practice part.")
 
-    db.commit()
-    db.refresh(session)
+    if commit:
+        db.commit()
+        db.refresh(session)
+    else:
+        db.flush()
     return session, questions
 
 
@@ -137,10 +143,11 @@ def get_current_question(db: Session, session_id: str) -> Optional[Question]:
         .all()
     )
 
-    # Get answered question IDs
+    # Valid answers require a non-empty transcript (failed STT can retry).
     answered_ids = {
         a.question_id
         for a in db.query(Answer).filter_by(session_id=session_id).all()
+        if (a.transcript or "").strip()
     }
 
     for q in all_questions:
@@ -160,7 +167,7 @@ def get_session_progress(db: Session, session_id: str) -> dict:
         .all()
     )
     answers = db.query(Answer).filter_by(session_id=session_id).all()
-    answered_ids = {a.question_id for a in answers}
+    answered_ids = {a.question_id for a in answers if (a.transcript or "").strip()}
 
     part1_qs = [q for q in questions if q.part == 1]
     part2_qs = [q for q in questions if q.part == 2]
@@ -186,28 +193,59 @@ def save_answer(
     word_count: Optional[int],
     filler_count: Optional[int],
     words_per_minute: Optional[float],
+    *,
+    audio_path: Optional[str] = None,
+    audio_mime: Optional[str] = None,
+    transcription_error: Optional[str] = None,
 ) -> Answer:
-    """Persist a transcribed answer to the DB."""
-    answer = Answer(
-        session_id=session_id,
-        question_id=question_id,
-        transcript=transcript,
-        audio_duration=duration,
-        word_count=word_count,
-        filler_count=filler_count,
-        words_per_minute=words_per_minute,
+    """Upsert answer for a question — replace before finalize is allowed."""
+    existing = (
+        db.query(Answer)
+        .filter_by(session_id=session_id, question_id=question_id)
+        .order_by(Answer.created_at.desc())
+        .first()
     )
-    db.add(answer)
+    if existing:
+        # Drop prior durable file when replacing.
+        if audio_path and existing.audio_path and existing.audio_path != audio_path:
+            from app.speaking.services.audio_store import delete_recording
+
+            delete_recording(existing.audio_path)
+        answer = existing
+    else:
+        answer = Answer(session_id=session_id, question_id=question_id)
+        db.add(answer)
+
+    answer.transcript = transcript
+    answer.audio_duration = duration
+    answer.word_count = word_count
+    answer.filler_count = filler_count
+    answer.words_per_minute = words_per_minute
+    if audio_path is not None:
+        answer.audio_path = audio_path
+    if audio_mime is not None:
+        answer.audio_mime = audio_mime
+    answer.transcription_error = transcription_error
+    answer.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(answer)
     return answer
 
 
 def is_session_complete(db: Session, session_id: str) -> bool:
-    """Return True if all questions in the session have been answered."""
-    total = db.query(Question).filter_by(session_id=session_id).count()
-    answered = db.query(Answer).filter_by(session_id=session_id).count()
-    return total > 0 and answered >= total
+    """True when every question has an answer with a non-empty transcript."""
+    questions = db.query(Question).filter_by(session_id=session_id).all()
+    if not questions:
+        return False
+    answers = {
+        a.question_id: a
+        for a in db.query(Answer).filter_by(session_id=session_id).all()
+    }
+    for q in questions:
+        a = answers.get(q.id)
+        if not a or not (a.transcript or "").strip():
+            return False
+    return True
 
 
 def complete_session(db: Session, session_id: str, estimated_band: Optional[float] = None):

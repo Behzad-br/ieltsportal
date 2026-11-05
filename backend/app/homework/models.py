@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, String, Text
+from sqlalchemy import Column, DateTime, Float, String, Text, UniqueConstraint
 
 from app.database import Base
 
@@ -57,6 +57,9 @@ class HomeworkAssignment(Base):
 
 class HomeworkSubmission(Base):
     __tablename__ = "homework_submissions"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "student_id", name="uq_homework_sub_assignment_student"),
+    )
 
     id = Column(String, primary_key=True, default=_uuid)
     assignment_id = Column(String, nullable=False, index=True)

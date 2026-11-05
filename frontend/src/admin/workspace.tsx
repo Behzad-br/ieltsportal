@@ -1,11 +1,20 @@
-import { type FormEvent, useRef, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'wouter';
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { ArrowLeft, ArrowUpRight, BriefcaseBusiness, Check, ClipboardCheck, FileText, GraduationCap, Headphones, ImagePlus, Library, PencilLine, Plus, Target, Trash2, Users } from 'lucide-react';
 import { Avatar, Badge, Button, ProgressBar, SearchInput, SectionTitle, StatCard, StatusBadge, Toast } from '@/components/ui-kit';
 import SuperAdminSettings from '@/admin/SuperAdminSettings';
-import { addBranch, adminTrend, assignedBatchIdsForTeacher, BRANCH_IMAGE_ACCEPT, branchPhoto, getBranch, getCurrentBranchAdmin, getCurrentBranchAdminUser, getReviewDraft, getStudentAccount, getTeacherAccount, isAdminUsernameTaken, isStudentRemoved, listAllBranchAdmins, listBranches, listCampusBatches, listMockEntities, listStudentAccounts, listTeacherAccounts, listTeacherRoster, publishReview, readBranchImageFile, removeBranch, removeStudentAccount, removeTeacherAccount, reviewEssay, saveMockEntity, saveReviewDraft, setTeacherBatchAssignments, studentWorkReport, students, updateBranch, updateCurrentBranchAdminAccount, updateStudentAccount, updateTeacherAccount, type ReviewDraft } from '@/lib/mock-api';
+import { addBranch, adminTrend, assignedBatchIdsForTeacher, BRANCH_IMAGE_ACCEPT, branchPhoto, createBranchAdmin, fetchBranchAdminUsers, getBranch, getCurrentBranchAdmin, getCurrentBranchAdminUser, getCurrentTeacher, getReviewDraft, getStudentAccount, getTeacherAccount, isAdminUsernameTaken, isStudentRemoved, listAllBranchAdmins, listBranches, listCampusBatches, listMockEntities, listStudentAccounts, listTeacherAccounts, listTeacherRoster, publishReview, readBranchImageFile, removeBranch, removeStudentAccount, removeTeacherAccount, reviewEssay, saveMockEntity, saveReviewDraft, setBranchActive, setBranchAdminActive, setTeacherBatchAssignments, studentWorkReport, students, updateBranch, updateCurrentBranchAdminAccount, updateStudentAccount, updateTeacherAccount, type BranchAdminUserRow, type ReviewDraft } from '@/lib/mock-api';
 import { DEMO_MODE, randomCampusName, randomPerson } from '@/lib/demo-mode';
+import {
+  fetchBranchAdminAnalytics,
+  fetchStudentRecordAnalytics,
+  fetchSuperAdminAnalytics,
+  formatBand,
+  type BranchAdminAnalytics,
+  type StudentRecordAnalytics,
+  type SuperAdminAnalytics,
+} from '@/lib/analytics-api';
 
 function initialsFrom(name: string) {
   return name.split(/\s+/).filter(Boolean).map((p) => p[0]).join('').slice(0, 2).toUpperCase() || 'T';
@@ -41,16 +50,24 @@ function FormPage({
   const [, setLocation] = useLocation();
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
-  const submit = (e: FormEvent<HTMLFormElement>) => {
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const data = Object.fromEntries(new FormData(e.currentTarget).entries()) as Record<string, string>;
     const problem = validate?.(data);
     if (problem) { setError(problem); return; }
     setError('');
+    setBusy(true);
     const { confirmPassword: _confirm, ...rest } = data;
-    saveMockEntity(kind, { ...rest, ...extra });
-    setToast('Saved');
-    setTimeout(() => setLocation(back), 500);
+    try {
+      await saveMockEntity(kind, { ...rest, ...extra });
+      setToast('Saved');
+      setTimeout(() => setLocation(back), 500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save.');
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <>
@@ -74,7 +91,7 @@ function FormPage({
           </label>
         ))}
         {error && <p className="text-sm text-red-700">{error}</p>}
-        <Button type="submit">{submitLabel}</Button>
+        <Button type="submit" disabled={busy}>{busy ? 'Saving…' : submitLabel}</Button>
       </form>
       {toast && <Toast message={toast} onClose={() => setToast('')} />}
     </>
@@ -101,6 +118,13 @@ function networkStudents(branchId?: string) {
       branchName: campus?.name || s.branchName || 'Unassigned',
     };
   });
+  // API mode: never merge static demo seed students (fake-data fallback).
+  if (!DEMO_MODE) {
+    return created.filter((s) =>
+      !isStudentRemoved(s.id, s.email) &&
+      (!branchId || s.branchId === branchId)
+    );
+  }
   const seed = [
     ...students.map((s) => ({ id: s.id, name: s.name, initials: s.initials, email: s.email, batch: s.batch, band: s.band, branchId: 'lahore', branchName: 'Lahore Branch' })),
     { id: 'k1', name: 'Hassan Ali', initials: 'HA', email: 'hassan.ali@example.com', batch: 'Morning Batch A', band: 6.0, branchId: 'karachi', branchName: 'Karachi Branch' },
@@ -124,27 +148,42 @@ function networkStudents(branchId?: string) {
 export function AdminDashboard() {
   const [, setLocation] = useLocation();
   const branches = listBranches();
-  const totalStudents = branches.reduce((n, b) => n + b.students, 0);
-  const totalTeachers = branches.reduce((n, b) => n + b.teachers, 0);
+  const [stats, setStats] = useState<SuperAdminAnalytics | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    fetchSuperAdminAnalytics()
+      .then(setStats)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load analytics'));
+  }, []);
+  const totalStudents = stats?.active_students ?? branches.reduce((n, b) => n + b.students, 0);
+  const totalTeachers = stats?.active_teachers ?? branches.reduce((n, b) => n + b.teachers, 0);
+  const branchCount = stats?.branches_active ?? branches.filter((b) => b.isActive !== false).length;
   return (
     <>
       <SectionTitle
         eyebrow="Super Admin"
         title="FTI network overview"
-        description="All six Pakistan campuses in one desk — branches, admins, and estimated practice bands."
+        description="All campuses in one desk — branches, admins, and DB-backed skill averages."
         action={<Button onClick={() => setLocation('/admin/branches/new')}><Plus size={16} />Add branch</Button>}
       />
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Branches" value={String(branches.length)} detail="Active campuses" icon={<Library size={17} />} />
-        <StatCard label="Students" value={String(totalStudents)} detail="Active this term" icon={<GraduationCap size={17} />} accent="amber" />
-        <StatCard label="Teachers" value={String(totalTeachers)} detail="Across the network" icon={<BriefcaseBusiness size={17} />} accent="blue" />
-        <StatCard label="Network avg band" value="6.3" detail="+0.2 this month" icon={<Target size={17} />} />
+        <StatCard label="Branches" value={String(branchCount)} detail={stats ? `${stats.branches_total} total · active only` : 'Active campuses'} icon={<Library size={17} />} />
+        <StatCard label="Students" value={String(totalStudents)} detail={stats ? `${stats.inactive_students} inactive excluded` : 'Active accounts'} icon={<GraduationCap size={17} />} accent="amber" />
+        <StatCard label="Teachers" value={String(totalTeachers)} detail="Active across the network" icon={<BriefcaseBusiness size={17} />} accent="blue" />
+        <StatCard label="Network skill avg" value={formatBand(stats?.skill_average_band)} detail={stats?.skill_average_note || 'No skill data yet'} icon={<Target size={17} />} />
       </div>
       <div className="mt-6 grid gap-6 xl:grid-cols-[1.3fr_.7fr]">
         <div className="card p-6">
           <div className="eyebrow">Network</div>
           <h2 className="mt-1 font-display text-lg font-bold">Practice volume & band</h2>
           <div className="mt-5 h-[255px]">
+            {adminTrend.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                No trend series yet — skill averages come from live attempts, not a fabricated chart.
+              </div>
+            ) : (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={adminTrend}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e6e0d4" />
@@ -154,6 +193,7 @@ export function AdminDashboard() {
                 <Line yAxisId="l" type="monotone" dataKey="band" stroke="#17665e" strokeWidth={3} dot={{ r: 4 }} />
               </LineChart>
             </ResponsiveContainer>
+            )}
           </div>
         </div>
         <div className="card p-6">
@@ -165,14 +205,14 @@ export function AdminDashboard() {
             <Link href="/admin/branches" className="text-xs font-bold text-primary">All branches</Link>
           </div>
           <div className="mt-5 space-y-3">
-            {branches.slice().sort((a, b) => a.avg - b.avg).slice(0, 4).map((b) => (
+            {branches.slice().sort((a, b) => (a.avg ?? 99) - (b.avg ?? 99)).slice(0, 4).map((b) => (
               <Link key={b.id} href={`/admin/branches/${b.id}`} className="flex items-center gap-3 rounded-lg p-2 hover:bg-muted">
                 <img src={branchPhoto(b)} alt="" className="h-10 w-10 rounded-lg object-cover" />
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-semibold">{b.name}</span>
                   <span className="block text-xs text-muted-foreground">{b.students} students · {b.admin}</span>
                 </span>
-                <strong className="text-sm">{b.avg.toFixed(1)}</strong>
+                <strong className="text-sm">{b.avg == null ? '—' : b.avg.toFixed(1)}</strong>
               </Link>
             ))}
           </div>
@@ -191,8 +231,8 @@ export function AdminTablePage({ page }: { page: string }) {
   const [toast, setToast] = useState('');
   const reload = () => setBranches(listBranches());
   const titles: Record<string, [string, string]> = {
-    branches: ['Branches', 'Rename a campus, set its admin login, or remove it from the network.'],
-    'branch-admins': ['Branch admins', 'Campus leads who run teachers and batches.'],
+    branches: ['Branches', 'Rename a campus, set its admin login, or deactivate it (history is preserved).'],
+    'branch-admins': ['Branch admins', 'Campus leads who run teachers and batches. One account maps to one campus.'],
     'practice-papers': ['Practice papers', 'Network question banks and mocks.'],
     teachers: ['Teachers', 'Every campus faculty in one place, with the branch name next to each teacher.'],
     students: ['Students', 'Learners grouped by campus, then by batch.'],
@@ -242,6 +282,7 @@ export function AdminTablePage({ page }: { page: string }) {
 
   const action =
     page === 'branches' ? <Button onClick={() => setLocation('/admin/branches/new')}><Plus size={16} />Add branch</Button>
+    : page === 'branch-admins' ? <Button onClick={() => setLocation('/admin/branch-admins/new')}><Plus size={16} />Add branch admin</Button>
     : page === 'practice-papers' ? <Button onClick={() => setLocation('/admin/practice-papers/new')}><Plus size={16} />Add paper</Button>
     : undefined;
 
@@ -268,43 +309,49 @@ export function AdminTablePage({ page }: { page: string }) {
       {page === 'branches' ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {branches.filter((b) => b.name.toLowerCase().includes(query.toLowerCase()) || b.city.toLowerCase().includes(query.toLowerCase())).map((b) => (
-            <div key={b.id} className="card overflow-hidden">
+            <div key={b.id} className={`card overflow-hidden ${b.isActive === false ? 'opacity-75' : ''}`}>
               <img src={branchPhoto(b)} alt="" className="h-28 w-full object-cover" />
               <div className="p-5">
-                <h2 className="font-display text-lg font-bold">{b.name}</h2>
-                <p className="mt-1 text-xs text-muted-foreground">{(b.admins?.length || 1)} admin{(b.admins?.length || 1) === 1 ? '' : 's'} · {b.students} students</p>
-                <div className="mt-4 flex justify-between text-sm"><span>Avg band</span><strong>{b.avg.toFixed(1)}</strong></div>
-                <ProgressBar value={Math.min(100, b.avg * 12)} />
+                <div className="flex items-start justify-between gap-2">
+                  <h2 className="font-display text-lg font-bold">{b.name}</h2>
+                  <span className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${b.isActive === false ? 'bg-muted text-muted-foreground' : 'bg-emerald-50 text-emerald-800'}`}>
+                    {b.isActive === false ? 'Inactive' : 'Active'}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{(b.admins?.length || 1)} admin{(b.admins?.length || 1) === 1 ? '' : 's'} · {b.students} students · {b.teachers} teachers</p>
+                <div className="mt-4 flex justify-between text-sm"><span>Skill avg</span><strong>{b.avg == null ? '—' : Number(b.avg).toFixed(1)}</strong></div>
+                {b.avg != null ? <ProgressBar value={Math.min(100, Number(b.avg) * 12)} /> : <p className="mt-2 text-xs text-muted-foreground">No campus skill average yet</p>}
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Button className="flex-1" variant="quiet" onClick={() => setLocation(`/admin/branches/${b.id}`)}><PencilLine size={15} />Edit</Button>
-                  <Button className="flex-1" variant="danger" onClick={() => {
-                    if (!window.confirm(`Remove ${b.name}? This campus will disappear from the network and its admin can no longer sign in.`)) return;
-                    removeBranch(b.id);
-                    reload();
-                    setToast(`${b.name} removed`);
-                  }}><Trash2 size={15} />Remove</Button>
+                  {b.isActive === false ? (
+                    <Button className="flex-1" variant="quiet" onClick={async () => {
+                      try {
+                        await setBranchActive(b.id, true);
+                        reload();
+                        setToast(`${b.name} reactivated`);
+                      } catch (err) {
+                        setToast(err instanceof Error ? err.message : 'Could not reactivate branch.');
+                      }
+                    }}>Reactivate</Button>
+                  ) : (
+                    <Button className="flex-1" variant="danger" onClick={async () => {
+                      if (!window.confirm(`Deactivate ${b.name}? Campus staff cannot sign in until reactivated. Academic history is kept.`)) return;
+                      try {
+                        await removeBranch(b.id);
+                        reload();
+                        setToast(`${b.name} deactivated`);
+                      } catch (err) {
+                        setToast(err instanceof Error ? err.message : 'Could not deactivate branch.');
+                      }
+                    }}><Trash2 size={15} />Deactivate</Button>
+                  )}
                 </div>
               </div>
             </div>
           ))}
         </div>
       ) : page === 'branch-admins' ? (
-        <div className="card overflow-hidden">
-          {listAllBranchAdmins().filter(({ branch, admin }) =>
-            admin.name.toLowerCase().includes(query.toLowerCase()) ||
-            admin.username.toLowerCase().includes(query.toLowerCase()) ||
-            branch.name.toLowerCase().includes(query.toLowerCase())
-          ).map(({ branch, admin }) => (
-            <div key={`${branch.id}-${admin.username}`} className="flex items-center gap-3 border-b border-border px-5 py-4 last:border-0">
-              <Avatar initials={admin.name.split(' ').map((p) => p[0]).join('').slice(0, 2)} size="sm" />
-              <div className="flex-1">
-                <div className="text-sm font-semibold">{admin.name}</div>
-                <div className="text-xs text-muted-foreground">{branch.name} · @{admin.username} · equal branch-admin rights</div>
-              </div>
-              <Button variant="quiet" onClick={() => setLocation(`/admin/branches/${branch.id}`)}>Manage</Button>
-            </div>
-          ))}
-        </div>
+        <BranchAdminsTable query={query} toast={toast} setToast={setToast} />
       ) : page === 'teachers' ? (
         <div className="space-y-5">
           {(() => {
@@ -521,6 +568,193 @@ function validateAdmins(admins: AdminDraft[], exceptBranchId?: string, opts?: { 
   return null;
 }
 
+function BranchAdminsTable({
+  query,
+  toast,
+  setToast,
+}: {
+  query: string;
+  toast: string;
+  setToast: (v: string) => void;
+}) {
+  const [, setLocation] = useLocation();
+  const [rows, setRows] = useState<BranchAdminUserRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState('');
+
+  const reload = async () => {
+    setLoading(true);
+    try {
+      setRows(await fetchBranchAdminUsers());
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : 'Could not load branch admins.');
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const filtered = rows.filter((row) => {
+    const q = query.toLowerCase();
+    return (
+      row.name.toLowerCase().includes(q) ||
+      row.username.toLowerCase().includes(q) ||
+      row.email.toLowerCase().includes(q) ||
+      row.branchName.toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    <div className="card overflow-hidden">
+      {loading ? (
+        <div className="p-6 text-sm text-muted-foreground">Loading branch admins…</div>
+      ) : !filtered.length ? (
+        <div className="p-6 text-sm text-muted-foreground">No branch admins match this search.</div>
+      ) : (
+        filtered.map((row) => (
+          <div key={row.id} className="flex flex-wrap items-center gap-3 border-b border-border px-5 py-4 last:border-0">
+            <Avatar initials={row.name.split(' ').map((p) => p[0]).join('').slice(0, 2)} size="sm" />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold">{row.name}</div>
+                <span className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${row.isActive ? 'bg-emerald-50 text-emerald-800' : 'bg-muted text-muted-foreground'}`}>
+                  {row.isActive ? 'Active' : 'Inactive'}
+                </span>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {row.branchName} · @{row.username}{row.email ? ` · ${row.email}` : ''}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="quiet" onClick={() => setLocation(`/admin/branches/${row.branchId}`)}>Campus</Button>
+              {row.isActive ? (
+                <Button
+                  variant="danger"
+                  disabled={busyId === row.id || row.id.includes(':')}
+                  onClick={async () => {
+                    if (!window.confirm(`Deactivate @${row.username}? They will not be able to sign in. The campus stays active.`)) return;
+                    setBusyId(row.id);
+                    try {
+                      await setBranchAdminActive(row.id, false);
+                      setToast(`@${row.username} deactivated`);
+                      await reload();
+                    } catch (err) {
+                      setToast(err instanceof Error ? err.message : 'Could not deactivate.');
+                    } finally {
+                      setBusyId('');
+                    }
+                  }}
+                >
+                  Deactivate
+                </Button>
+              ) : (
+                <Button
+                  variant="quiet"
+                  disabled={busyId === row.id || row.id.includes(':')}
+                  onClick={async () => {
+                    setBusyId(row.id);
+                    try {
+                      await setBranchAdminActive(row.id, true);
+                      setToast(`@${row.username} reactivated`);
+                      await reload();
+                    } catch (err) {
+                      setToast(err instanceof Error ? err.message : 'Could not reactivate.');
+                    } finally {
+                      setBusyId('');
+                    }
+                  }}
+                >
+                  Reactivate
+                </Button>
+              )}
+            </div>
+          </div>
+        ))
+      )}
+      {toast ? <Toast message={toast} onClose={() => setToast('')} /> : null}
+    </div>
+  );
+}
+
+export function AddBranchAdminPage() {
+  const [, setLocation] = useLocation();
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const campuses = listBranches().filter((b) => b.isActive !== false);
+  const [branchId, setBranchId] = useState(campuses[0]?.id || '');
+
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.currentTarget).entries()) as Record<string, string>;
+    if ((data.password || '').length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    if (data.password !== data.confirm) {
+      setError('Passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await createBranchAdmin({
+        name: data.name,
+        username: data.username,
+        password: data.password,
+        email: data.email || undefined,
+        branchId: data.branchId || branchId,
+      });
+      setLocation('/admin/branch-admins');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create branch admin.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button onClick={() => setLocation('/admin/branch-admins')} className="mb-6 flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
+        <ArrowLeft size={16} />Back
+      </button>
+      <SectionTitle
+        eyebrow="Super Admin"
+        title="Add a branch admin"
+        description="Creates a real auth_users row with role branch_admin on one campus. Password is hashed and never shown again."
+      />
+      <form onSubmit={submit} className="card max-w-xl space-y-4 p-6">
+        <label className="block text-sm font-semibold">
+          Campus
+          <select
+            name="branchId"
+            required
+            value={branchId}
+            onChange={(e) => setBranchId(e.target.value)}
+            className="mt-2 h-11 w-full rounded-lg border border-input bg-card px-3 text-sm"
+          >
+            {!campuses.length && <option value="">No active campuses</option>}
+            {campuses.map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-sm font-semibold">Full name<input name="name" required className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
+        <label className="block text-sm font-semibold">Username<input name="username" required minLength={3} className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
+        <label className="block text-sm font-semibold">Email (optional)<input name="email" type="email" className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
+        <label className="block text-sm font-semibold">Password<input name="password" type="password" required minLength={6} className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
+        <label className="block text-sm font-semibold">Confirm password<input name="confirm" type="password" required minLength={6} className="mt-2 h-11 w-full rounded-lg border border-input px-3 text-sm" /></label>
+        {error && <p className="text-sm text-red-700">{error}</p>}
+        <Button type="submit" disabled={busy || !campuses.length}>{busy ? 'Creating…' : 'Create branch admin'}</Button>
+      </form>
+    </>
+  );
+}
+
 export function AddBranchPage() {
   const [, setLocation] = useLocation();
   const [error, setError] = useState('');
@@ -608,7 +842,7 @@ export function AddPracticePaperPage() {
 
 export function BranchDetailPage({ branchId }: { branchId: string }) {
   const [, setLocation] = useLocation();
-  const existing = getBranch(branchId);
+  const [existing, setExisting] = useState(() => getBranch(branchId));
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -639,7 +873,7 @@ export function BranchDetailPage({ branchId }: { branchId: string }) {
   if (!existing) {
     return (
       <div className="card p-8 text-center">
-        <h2 className="font-display text-xl font-bold">This branch was removed.</h2>
+        <h2 className="font-display text-xl font-bold">This branch was not found.</h2>
         <Button className="mt-5" onClick={() => setLocation('/admin/branches')}>Back to branches</Button>
       </div>
     );
@@ -652,16 +886,35 @@ export function BranchDetailPage({ branchId }: { branchId: string }) {
     setBusy(true);
     setError('');
     try {
-      await updateBranch(branchId, {
+      const saved = await updateBranch(branchId, {
         name: name.trim(),
         city: city.trim(),
         imageUrl: imageUrl.trim(),
         admins: admins.map((a) => ({ name: a.name.trim(), username: a.username.trim(), password: a.password })),
       });
+      setExisting(saved);
       setToast('Campus saved. Branch admin logins are live in the database.');
       setAdmins((rows) => rows.map((a) => ({ ...a, password: '', confirm: '' })));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save this campus.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleActive = async () => {
+    const next = existing.isActive === false;
+    if (!next && !window.confirm(`Deactivate ${existing.name}? Campus staff cannot sign in until reactivated. Academic history is kept.`)) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const saved = next ? await setBranchActive(branchId, true) : await removeBranch(branchId);
+      setExisting(saved);
+      setToast(next ? `${saved.name} reactivated` : `${saved.name} deactivated`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update branch status.');
     } finally {
       setBusy(false);
     }
@@ -674,14 +927,12 @@ export function BranchDetailPage({ branchId }: { branchId: string }) {
         <img src={branchPhoto({ id: existing.id, imageUrl })} alt="" className="h-44 w-full object-cover" />
         <div className="bg-card p-6">
           <SectionTitle
-            eyebrow={existing.city}
+            eyebrow={`${existing.city}${existing.isActive === false ? ' · Inactive' : ' · Active'}`}
             title={existing.name}
-            description="Add as many branch admins as you need. They all have the same rights on this campus."
-            action={<Button variant="danger" onClick={() => {
-              if (!window.confirm(`Remove ${existing.name}?`)) return;
-              removeBranch(branchId);
-              setLocation('/admin/branches');
-            }}><Trash2 size={15} />Remove branch</Button>}
+            description="Add as many branch admins as you need. They all have the same rights on this campus. Deactivation blocks login but keeps history."
+            action={<Button variant={existing.isActive === false ? 'quiet' : 'danger'} disabled={busy} onClick={toggleActive}>
+              {existing.isActive === false ? 'Reactivate campus' : <><Trash2 size={15} />Deactivate campus</>}
+            </Button>}
           />
           <div className="mb-6 grid gap-4 sm:grid-cols-3">
             <StatCard label="Students" value={String(existing.students)} icon={<GraduationCap size={17} />} />
@@ -807,6 +1058,14 @@ export function BranchAdminDashboard() {
   const [, setLocation] = useLocation();
   const campus = getCurrentBranchAdmin();
   const adminUser = getCurrentBranchAdminUser();
+  const [stats, setStats] = useState<BranchAdminAnalytics | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    fetchBranchAdminAnalytics()
+      .then(setStats)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load analytics'));
+  }, []);
   if (!campus) {
     return (
       <div className="card p-8 text-center">
@@ -817,6 +1076,10 @@ export function BranchAdminDashboard() {
   }
   const faculty = campusTeachers(campus.id);
   const batches = campusBatches(campus.id);
+  const teacherCount = stats?.active_teachers ?? faculty.length;
+  const studentCount = stats?.active_students ?? campus?.students ?? 0;
+  const batchCount = stats?.batches ?? batches.length;
+  const campusAvg = stats?.skill_average_band ?? campus?.avg ?? null;
   return (
     <>
       <SectionTitle
@@ -825,11 +1088,12 @@ export function BranchAdminDashboard() {
         description="Teachers, batches, and student movement for this campus."
         action={<Button onClick={() => setLocation('/branch-admin/teachers/new')}><Plus size={16} />Add teacher</Button>}
       />
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Teachers" value={String(faculty.length)} detail="On this campus" icon={<BriefcaseBusiness size={17} />} />
-        <StatCard label="Students" value={String(campus?.students ?? 0)} detail={`${batches.length} batches`} icon={<GraduationCap size={17} />} accent="amber" />
-        <StatCard label="Campus avg" value={(campus?.avg ?? 0).toFixed(1)} detail="+0.3 this term" icon={<Target size={17} />} accent="blue" />
-        <StatCard label="Batches" value={String(batches.length)} detail="Morning and evening" icon={<Users size={17} />} />
+        <StatCard label="Teachers" value={String(teacherCount)} detail="Active on this campus" icon={<BriefcaseBusiness size={17} />} />
+        <StatCard label="Students" value={String(studentCount)} detail={`${batchCount} batches · active only`} icon={<GraduationCap size={17} />} accent="amber" />
+        <StatCard label="Campus skill avg" value={formatBand(campusAvg)} detail={stats?.skill_average_note || 'No skill data yet'} icon={<Target size={17} />} accent="blue" />
+        <StatCard label="Batches" value={String(batchCount)} detail="On this campus only" icon={<Users size={17} />} />
       </div>
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         <div className="card p-6">
@@ -855,6 +1119,12 @@ export function BranchAdminDashboard() {
         <div className="card p-6">
           <h2 className="font-display text-lg font-bold">Campus trend</h2>
           <div className="mt-4 h-[220px]">
+            {adminTrend.length === 0 ? (
+              <div className="flex h-full flex-col justify-center gap-2 text-sm text-muted-foreground">
+                <p>No fabricated trend chart in API mode.</p>
+                <p>Pending reviews: {stats?.pending_reviews ?? '—'} · Active homework: {stats?.active_homework ?? '—'}</p>
+              </div>
+            ) : (
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={adminTrend}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e6e0d4" />
@@ -863,6 +1133,7 @@ export function BranchAdminDashboard() {
                 <Bar dataKey="attempts" fill="#e2a24b" radius={6} />
               </BarChart>
             </ResponsiveContainer>
+            )}
           </div>
         </div>
       </div>
@@ -915,10 +1186,14 @@ export function BranchAdminTablePage({ page }: { page: string }) {
               <button
                 type="button"
                 className="shrink-0 rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50"
-                onClick={() => {
+                onClick={async () => {
                   if (!confirm(`Delete ${row.name}? They will no longer be able to sign in, and their batches will be unassigned.`)) return;
-                  removeTeacherAccount(row.id);
-                  setToast(`${row.name} has been removed.`);
+                  try {
+                    await removeTeacherAccount(row.id);
+                    setToast(`${row.name} has been removed.`);
+                  } catch (err) {
+                    setToast(err instanceof Error ? err.message : 'Could not remove teacher.');
+                  }
                 }}
               >
                 Delete
@@ -959,10 +1234,14 @@ export function BranchAdminTablePage({ page }: { page: string }) {
                       <button
                         type="button"
                         className="shrink-0 rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50"
-                        onClick={() => {
+                        onClick={async () => {
                           if (!confirm(`Delete ${s.name} from this branch? They will be removed from ${s.batch}.`)) return;
-                          removeStudentAccount(s.id, s.email);
-                          setToast(`${s.name} has been removed.`);
+                          try {
+                            await removeStudentAccount(s.id, s.email);
+                            setToast(`${s.name} has been removed.`);
+                          } catch (err) {
+                            setToast(err instanceof Error ? err.message : 'Could not remove student.');
+                          }
                         }}
                       >
                         Delete
@@ -1056,29 +1335,36 @@ export function EditTeacherPage({ teacherId }: { teacherId: string }) {
     setSelectedBatchIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   };
 
-  const save = (e: FormEvent) => {
+  const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!email.includes('@')) { setError('Enter a valid login email.'); return; }
     if (username.trim().length < 3) { setError('Username must be at least 3 characters.'); return; }
-    if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    if (password && password.length < 6) { setError('Password must be at least 6 characters (or leave blank to keep current).'); return; }
     if (password !== confirmPassword) { setError('Passwords do not match.'); return; }
     const taken = listTeacherAccounts().some((t) =>
       t.id !== teacher.id && (t.email?.toLowerCase() === email.toLowerCase() || t.username?.toLowerCase() === username.toLowerCase())
     );
     if (taken) { setError('This email or username is already used by another teacher.'); return; }
-    updateTeacherAccount(teacher.id, {
-      fullName: fullName.trim(),
-      name: fullName.trim(),
-      email: email.trim(),
-      username: username.trim(),
-      password,
-    });
-    setTeacherBatchAssignments(teacher.id, selectedBatchIds);
     setError('');
-    const batchNote = selectedBatchIds.length
-      ? `${selectedBatchIds.length} batch${selectedBatchIds.length === 1 ? '' : 'es'} assigned.`
-      : 'No batches assigned.';
-    setToast(`Saved. ${batchNote} The teacher can sign in with this email or username.`);
+    try {
+      const patch: Record<string, string> = {
+        fullName: fullName.trim(),
+        name: fullName.trim(),
+        email: email.trim(),
+        username: username.trim(),
+      };
+      if (password) patch.password = password;
+      await updateTeacherAccount(teacher.id, patch);
+      await setTeacherBatchAssignments(teacher.id, selectedBatchIds);
+      const batchNote = selectedBatchIds.length
+        ? `${selectedBatchIds.length} batch${selectedBatchIds.length === 1 ? '' : 'es'} assigned.`
+        : 'No batches assigned.';
+      setToast(`Saved. ${batchNote} The teacher can sign in with this email or username.`);
+      setPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save teacher.');
+    }
   };
 
   return (
@@ -1161,10 +1447,14 @@ export function EditTeacherPage({ teacherId }: { teacherId: string }) {
           <button
             type="button"
             className="h-11 rounded-lg border border-red-200 px-4 text-sm font-semibold text-red-700 hover:bg-red-50"
-            onClick={() => {
+            onClick={async () => {
               if (!confirm(`Delete ${fullName || 'this teacher'}? They will no longer be able to sign in, and their batches will be unassigned.`)) return;
-              removeTeacherAccount(teacher.id);
-              setLocation('/branch-admin/teachers');
+              try {
+                await removeTeacherAccount(teacher.id);
+                setLocation('/branch-admin/teachers');
+              } catch (err) {
+                setError(err instanceof Error ? err.message : 'Could not remove teacher.');
+              }
             }}
           >
             Delete teacher
@@ -1181,7 +1471,8 @@ export function AddStudentPage() {
   const batchOptions = campusBatches(campus?.id);
   const [batch, setBatch] = useState(batchOptions[0]?.name || '');
   const [error, setError] = useState('');
-  const submit = (e: FormEvent<HTMLFormElement>) => {
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const data = Object.fromEntries(new FormData(e.currentTarget).entries()) as Record<string, string>;
     if (!batch) { setError('Create a batch first, then add students to it.'); return; }
@@ -1194,16 +1485,24 @@ export function AddStudentPage() {
       (s.username || '').toLowerCase() === loginId.toLowerCase()
     );
     if (taken) { setError('This email or username is already used by another student.'); return; }
-    saveMockEntity('student', {
-      fullName: data.fullName.trim(),
-      email: data.email.trim(),
-      username: (data.username || data.email.split('@')[0]).trim(),
-      password: data.password,
-      batch,
-      branchId: campus?.id || '',
-      branchName: campus?.name || '',
-    });
-    setLocation('/branch-admin/students');
+    setBusy(true);
+    setError('');
+    try {
+      await saveMockEntity('student', {
+        fullName: data.fullName.trim(),
+        email: data.email.trim(),
+        username: (data.username || data.email.split('@')[0]).trim(),
+        password: data.password,
+        batch,
+        branchId: campus?.id || '',
+        branchName: campus?.name || '',
+      });
+      setLocation('/branch-admin/students');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create student.');
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <>
@@ -1231,7 +1530,7 @@ export function AddStudentPage() {
           </select>
         </label>
         {error && <p className="text-sm text-red-700">{error}</p>}
-        <Button type="submit" disabled={!batchOptions.length}>Create student</Button>
+        <Button type="submit" disabled={!batchOptions.length || busy}>{busy ? 'Saving…' : 'Create student'}</Button>
       </form>
     </>
   );
@@ -1243,8 +1542,9 @@ export function AddBatchPage() {
   const [teacherId, setTeacherId] = useState(teachers[0]?.id || '');
   const [subjects, setSubjects] = useState<string[]>(['Writing']);
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  const submit = (e: FormEvent<HTMLFormElement>) => {
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const data = Object.fromEntries(new FormData(e.currentTarget).entries()) as Record<string, string>;
     const teacher = teachers.find((t) => t.id === teacherId);
@@ -1256,16 +1556,24 @@ export function AddBatchPage() {
       setError('Pick at least one subject this teacher will teach in the batch.');
       return;
     }
-    saveMockEntity('batch', {
-      name: data.name.trim(),
-      schedule: data.schedule.trim(),
-      teacherId: teacher.id,
-      teacherName: teacher.name,
-      subjects: subjects.join(' · '),
-      branchId: campus?.id || '',
-      branchName: campus?.name || '',
-    });
-    setLocation('/branch-admin/batches');
+    setBusy(true);
+    setError('');
+    try {
+      await saveMockEntity('batch', {
+        name: data.name.trim(),
+        schedule: data.schedule.trim(),
+        teacherId: teacher.id,
+        teacherName: teacher.name,
+        subjects: subjects.join(' · '),
+        branchId: campus?.id || '',
+        branchName: campus?.name || '',
+      });
+      setLocation('/branch-admin/batches');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create batch.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -1316,7 +1624,7 @@ export function AddBatchPage() {
           <p className="text-sm text-amber-800">Add a teacher first, then you can assign them to a batch.</p>
         )}
         {error && <p className="text-sm text-red-700">{error}</p>}
-        <Button type="submit" disabled={teachers.length === 0}>Create batch</Button>
+        <Button type="submit" disabled={teachers.length === 0 || busy}>{busy ? 'Saving…' : 'Create batch'}</Button>
       </form>
     </>
   );
@@ -1416,8 +1724,16 @@ export function BranchStudentDetailPage({ studentId }: { studentId: string }) {
   const [fullName, setFullName] = useState(account?.fullName || listed?.name || '');
   const [email, setEmail] = useState(account?.email || listed?.email || '');
   const [username, setUsername] = useState(account?.username || (listed?.email || '').split('@')[0]);
-  const [password, setPassword] = useState(account?.password || 'password123');
-  const [confirmPassword, setConfirmPassword] = useState(account?.password || 'password123');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [liveReport, setLiveReport] = useState<StudentRecordAnalytics | null>(null);
+
+  useEffect(() => {
+    if (DEMO_MODE || !studentId) return;
+    fetchStudentRecordAnalytics(studentId)
+      .then(setLiveReport)
+      .catch(() => setLiveReport(null));
+  }, [studentId]);
 
   if (!listed) {
     return (
@@ -1428,28 +1744,35 @@ export function BranchStudentDetailPage({ studentId }: { studentId: string }) {
     );
   }
 
-  const save = (e: FormEvent) => {
+  const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!email.includes('@')) { setError('Enter a valid login email.'); return; }
     if (username.trim().length < 3) { setError('Username must be at least 3 characters.'); return; }
-    if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    if (password && password.length < 6) { setError('Password must be at least 6 characters (or leave blank to keep current).'); return; }
     if (password !== confirmPassword) { setError('Passwords do not match.'); return; }
     const taken = listStudentAccounts().some((s) =>
       s.id !== listed.id && (s.email?.toLowerCase() === email.toLowerCase() || s.username?.toLowerCase() === username.toLowerCase())
     );
     if (taken) { setError('This email or username is already used by another student.'); return; }
-    updateStudentAccount(listed.id, {
-      fullName: fullName.trim(),
-      name: fullName.trim(),
-      email: email.trim(),
-      username: username.trim(),
-      password,
-      batch: listed.batch,
-      branchId: listed.branchId,
-      branchName: listed.branchName,
-    });
     setError('');
-    setToast('Login saved. The student can sign in with this email or username and password.');
+    try {
+      const patch: Record<string, string> = {
+        fullName: fullName.trim(),
+        name: fullName.trim(),
+        email: email.trim(),
+        username: username.trim(),
+        batch: listed.batch,
+        branchId: listed.branchId,
+        branchName: listed.branchName,
+      };
+      if (password) patch.password = password;
+      await updateStudentAccount(listed.id, patch);
+      setToast('Login saved. The student can sign in with this email or username.');
+      setPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save student.');
+    }
   };
 
   return (
@@ -1475,10 +1798,14 @@ export function BranchStudentDetailPage({ studentId }: { studentId: string }) {
           <button
             type="button"
             className="mt-6 h-11 w-full rounded-lg border border-red-200 px-4 text-sm font-semibold text-red-700 hover:bg-red-50"
-            onClick={() => {
+            onClick={async () => {
               if (!confirm(`Delete ${fullName || listed.name} from this branch?`)) return;
-              removeStudentAccount(listed.id, listed.email);
-              setLocation('/branch-admin/students');
+              try {
+                await removeStudentAccount(listed.id, listed.email);
+                setLocation('/branch-admin/students');
+              } catch (err) {
+                setError(err instanceof Error ? err.message : 'Could not remove student.');
+              }
             }}
           >
             Delete student
@@ -1511,24 +1838,64 @@ export function BranchStudentDetailPage({ studentId }: { studentId: string }) {
         </form>
       </div>
       {(() => {
-        const report = studentWorkReport(listed.id, listed.batch);
+        const fallback = DEMO_MODE ? studentWorkReport(listed.id, listed.batch) : null;
+        const report = liveReport
+          ? {
+              assigned: liveReport.assigned,
+              completed: liveReport.completed,
+              inProgress: liveReport.in_progress,
+              pending: liveReport.pending,
+              completionPct: liveReport.completion_pct,
+              practiceSessions: liveReport.practice_sessions,
+              skills: liveReport.skills,
+              items: [] as { id: string; title: string; skill: string; teacher: string; due: string; status: string }[],
+            }
+          : fallback
+            ? {
+                assigned: fallback.assigned,
+                completed: fallback.completed,
+                inProgress: fallback.inProgress,
+                pending: fallback.pending,
+                completionPct: fallback.completionPct,
+                practiceSessions: fallback.practiceSessions,
+                skills: fallback.skills,
+                items: fallback.items || [],
+              }
+            : {
+                assigned: 0,
+                completed: 0,
+                inProgress: 0,
+                pending: 0,
+                completionPct: 0,
+                practiceSessions: 0,
+                skills: [
+                  { skill: 'Reading', assigned: 0, completed: 0 },
+                  { skill: 'Listening', assigned: 0, completed: 0 },
+                  { skill: 'Writing', assigned: 0, completed: 0 },
+                  { skill: 'Speaking', assigned: 0, completed: 0 },
+                ],
+                items: [] as { id: string; title: string; skill: string; teacher: string; due: string; status: string }[],
+              };
         const skillIcon = (skill: string) => skill === 'Writing' ? <PencilLine size={16} /> : skill === 'Reading' ? <FileText size={16} /> : skill === 'Listening' ? <Headphones size={16} /> : <Users size={16} />;
         return (
           <div className="mt-6 space-y-4">
             <SectionTitle
               eyebrow="Activity report"
               title="Homework & practice"
-              description="What this student was assigned, what they finished, and how the four skills look so far."
+              description={DEMO_MODE ? 'Demo sandbox activity.' : 'DB-backed homework and practice counts for this student on your campus.'}
             />
+            {!DEMO_MODE && !liveReport && (
+              <p className="text-sm text-muted-foreground">Loading activity from the server…</p>
+            )}
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <StatCard label="Homework assigned" value={String(report.assigned)} detail="From teachers on this campus" icon={<ClipboardCheck size={17} />} />
               <StatCard label="Completed" value={String(report.completed)} detail={`${report.completionPct}% of assigned`} icon={<Check size={17} />} accent="amber" />
               <StatCard label="Still open" value={String(report.pending + report.inProgress)} detail={`${report.inProgress} in progress · ${report.pending} pending`} icon={<FileText size={17} />} accent="blue" />
-              <StatCard label="Practice sessions" value={String(report.practiceSessions)} detail="Self-practice this term" icon={<Target size={17} />} />
+              <StatCard label="Practice sessions" value={String(report.practiceSessions)} detail="Submitted skill attempts" icon={<Target size={17} />} />
             </div>
             <div className="card p-6">
               <div className="eyebrow">Four skills</div>
-              <h3 className="mt-1 font-display text-lg font-bold">Assigned vs completed</h3>
+              <h3 className="mt-1 font-display text-lg font-bold">Practice attempts completed</h3>
               <div className="mt-5 grid gap-4 sm:grid-cols-2">
                 {report.skills.map((row) => (
                   <div key={row.skill} className="rounded-xl border border-border p-4">
@@ -1546,7 +1913,11 @@ export function BranchStudentDetailPage({ studentId }: { studentId: string }) {
                 <div className="eyebrow">Homework list</div>
                 <h3 className="mt-1 font-display text-lg font-bold">Every assignment on this student</h3>
               </div>
-              {report.items.map((item) => (
+              {report.items.length === 0 ? (
+                <p className="px-5 py-6 text-sm text-muted-foreground">
+                  {DEMO_MODE ? 'No homework items.' : 'Homework detail rows come from the homework module; counts above are DB-backed.'}
+                </p>
+              ) : report.items.map((item) => (
                 <div key={item.id} className="flex flex-wrap items-center gap-3 border-b border-border px-5 py-4 last:border-0">
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold">{item.title}</div>
@@ -1595,15 +1966,18 @@ export function TeacherAddStudentPage({ batchId }: { batchId?: string }) {
   const [, setLocation] = useLocation();
   const decodedBatch = batchId ? decodeURIComponent(batchId) : '';
   const back = decodedBatch ? `/teacher/batches/${batchId}` : '/teacher/students';
+  const teacher = getCurrentTeacher();
+  const campusId = teacher.branchId || '';
   const batchOptions = Array.from(new Set([
     decodedBatch,
     ...listTeacherRoster().map((s) => s.batch),
-    ...listCampusBatches('lahore').map((b) => b.name),
+    ...listCampusBatches(campusId || undefined).map((b) => b.name),
   ].filter(Boolean)));
   const [batch, setBatch] = useState(decodedBatch || batchOptions[0] || '');
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  const submit = (e: FormEvent<HTMLFormElement>) => {
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const data = Object.fromEntries(new FormData(e.currentTarget).entries()) as Record<string, string>;
     const fullName = (data.fullName || '').trim();
@@ -1619,22 +1993,35 @@ export function TeacherAddStudentPage({ batchId }: { batchId?: string }) {
       (s.email || '').toLowerCase() === `${loginId.toLowerCase()}@student.fti.local`
     );
     if (taken) { setError('This student ID is already used.'); return; }
-    saveMockEntity('student', {
-      fullName,
-      name: fullName,
-      username: loginId,
-      studentId: loginId,
-      email: `${loginId.toLowerCase().replace(/[^a-z0-9._-]/g, '')}@student.fti.local`,
-      password: data.password,
-      batch,
-      branchId: 'lahore',
-      branchName: 'Lahore Branch',
-      band: '0',
-      trend: '—',
-      status: 'New',
-      lastActive: 'Just added',
-    });
-    setLocation(back);
+    const branchId = teacher.branchId || '';
+    if (!DEMO_MODE && !branchId) {
+      setError('Your teacher account has no branch. Sign in again or ask an admin to assign a branch.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await saveMockEntity('student', {
+        fullName,
+        name: fullName,
+        username: loginId,
+        studentId: loginId,
+        email: `${loginId.toLowerCase().replace(/[^a-z0-9._-]/g, '')}@student.fti.local`,
+        password: data.password,
+        batch,
+        branchId: branchId || (DEMO_MODE ? 'demo-gujranwala' : ''),
+        branchName: teacher.branchName || '',
+        band: '0',
+        trend: '—',
+        status: 'New',
+        lastActive: 'Just added',
+      });
+      setLocation(back);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create student.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -1669,7 +2056,7 @@ export function TeacherAddStudentPage({ batchId }: { batchId?: string }) {
           </select>
         </label>
         {error && <p className="text-sm text-red-700">{error}</p>}
-        <Button type="submit" disabled={!batch}>Add student</Button>
+        <Button type="submit" disabled={!batch || busy}>{busy ? 'Saving…' : 'Add student'}</Button>
       </form>
     </>
   );

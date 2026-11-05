@@ -28,11 +28,15 @@ export default function TeacherStudentsList() {
     }
   };
 
-  const removeStudent = (s: Student) => {
+  const removeStudent = async (s: Student) => {
     if (!confirm(`Remove login for ${s.name}? They will not be able to sign in.`)) return;
-    removeStudentAccount(s.id, s.email);
-    setRoster(listTeacherRoster());
-    setToast(`${s.name} login removed.`);
+    try {
+      await removeStudentAccount(s.id, s.email);
+      setRoster(listTeacherRoster());
+      setToast(`${s.name} login removed.`);
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : 'Could not remove student.');
+    }
   };
 
   return (

@@ -111,6 +111,9 @@ class SessionResultSchema(BaseModel):
     practice_part: Optional[int] = None
     status: str
     estimated_band: Optional[float]
+    teacher_band: Optional[float] = None
+    final_band: Optional[float] = None
+    band_source: str = "none"
     started_at: datetime
     completed_at: Optional[datetime]
     evaluation: Optional[EvaluationSchema]
@@ -123,6 +126,9 @@ class HistoryItemSchema(BaseModel):
     title: Optional[str]
     practice_part: Optional[int] = None
     estimated_band: Optional[float]
+    teacher_band: Optional[float] = None
+    final_band: Optional[float] = None
+    band_source: str = "none"
     started_at: datetime
     completed_at: Optional[datetime]
     status: str
@@ -147,3 +153,8 @@ class HealthSchema(BaseModel):
     minimax_configured: bool
     whisper_model: str
     app_name: str
+    # Release readiness (Module 24) — no secrets; optional for older clients.
+    ffmpeg_available: bool = False
+    whisper_importable: bool = False
+    speaking_deps_ready: bool = False
+    media_dirs_writable: bool = False

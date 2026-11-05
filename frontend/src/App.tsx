@@ -6,8 +6,9 @@ import { Link, Redirect, Route, Switch, Router as WouterRouter, useLocation } fr
 import { Archive, ArrowLeft, ArrowUpRight, BarChart3, BookOpen, BrainCircuit, BriefcaseBusiness, Calculator, CalendarDays, Check, CheckCircle2, CheckCheck, ChevronDown, ClipboardCheck, Clock3, Eye, EyeOff, FileText, GraduationCap, Headphones, Image, Info, LayoutGrid, Library, LockKeyhole, LogOut, MapPin, Menu, Monitor, MoreHorizontal, NotebookPen, Paperclip, PencilLine, Plus, Save, Send, Settings, ShieldCheck, Sparkles, Target, Trash2, Users, X } from 'lucide-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Avatar, Badge, Button, Countdown, Crumb, EmptyState, ProgressBar, SearchInput, SectionTitle, StatCard, StatusBadge, Toast } from '@/components/ui-kit';
-import { apiLogin, clearAuthSession, getAccessToken } from '@/lib/auth-api';
-import { DEMO_MODE, enterDemoRole, randomPerson, seedDemoWorld } from '@/lib/demo-mode';
+import { apiLogin, apiMe, clearAuthSession, getAccessToken, getAuthUser, mapAuthRoleToUi } from '@/lib/auth-api';
+import { DEMO_BANNER_TEXT, DEMO_MODE, enterDemoRole, isDemoToken, purgeDemoSessionIfDisabled, randomPerson, seedDemoWorld } from '@/lib/demo-mode';
+import { forceLogout, homePathForRole, pathAllowedForUser } from '@/lib/identity';
 import { hydrateOrgFromBackend } from '@/lib/hydrate-org';
 import { assignments, branchPhoto, getCurrentBranchAdmin, getCurrentBranchAdminUser, getCurrentStudent, getCurrentSuperAdmin, getCurrentTeacher, getDraft, getPublishedReview, getReviewDraft, getRole, getStudentAccount, getWritingDraft, getWritingSession, listBranches, listStudentAccounts, listTeacherRoster, publishReview, reviewEssay, saveDraft, saveMockEntity, saveReviewDraft, saveWritingDraft, setCurrentBranchAdmin, setCurrentStudent, setCurrentTeacher, setPublishedReview, setRole, startWritingSession, student, students, subscribeSuperAdminSession, subscribeTeacherSession, submitHomework, submitPractice, updateCurrentSuperAdminAccount, updateStudentAccount, type Assignment, type AssignmentStatus, type ReviewDraft, type Role } from '@/lib/mock-api';
 import HomeworkComposer from '@/teacher/HomeworkComposer';
@@ -18,7 +19,16 @@ import HomeworkDo from '@/student/HomeworkDo';
 import PendingHomeworkPanel from '@/student/PendingHomeworkPanel';
 import PracticeSetup from '@/student/PracticeSetup';
 import IeltsTestsHub from '@/student/IeltsTestsHub';
+import { StudentHistoryLive, StudentResultsLive } from '@/student/ResultsHub';
+import { TeacherResultsLive } from '@/teacher/ResultsHub';
 import { studentHomework } from '@/lib/homework-api';
+import {
+  fetchStudentAnalytics,
+  fetchTeacherAnalytics,
+  formatBand,
+  type StudentAnalytics,
+  type TeacherAnalytics,
+} from '@/lib/analytics-api';
 import AuthHero from '@/components/AuthHero';
 import { Logo } from '@/components/brand';
 import IeltsCalculator from '@/components/IeltsCalculator';
@@ -40,7 +50,7 @@ import AssignMock from '@/teacher/mocks/AssignMock';
 import { studentMockInbox } from '@/lib/mocks-api';
 import { AssignedMocksPage, LiveMonitoringPage, MockLibraryPage, MockResultsPage } from '@/teacher/mocks/MockExamsPages';
 import {
-  AddBatchPage, AddBranchPage, AddPracticePaperPage, AddStudentPage, AddTeacherPage, EditTeacherPage,
+  AddBatchPage, AddBranchAdminPage, AddBranchPage, AddPracticePaperPage, AddStudentPage, AddTeacherPage, EditTeacherPage,
   AdminDashboard, AdminTablePage, BranchAdminDashboard, BranchAdminSettingsPage, BranchAdminTablePage,
   BranchBatchDetailPage, BranchDetailPage, BranchStudentDetailPage, Reports, ReviewPage,
   TeacherAddStudentPage, TeacherBatchDetailPage, TeacherStudentDetailPage,
@@ -179,7 +189,7 @@ function Shell({ role, children }: {role:Role; children:ReactNode}) {
       <div className="mt-4 shrink-0 border-t border-white/10 pt-4">
         <div className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[.16em] text-white/35">Account</div>
         <Link href={settingsHref} data-testid="link-settings" className={`nav-link flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium ${location===settingsHref?'active':''}`}><Settings size={17}/>Settings</Link>
-        <Link href="/" onClick={()=>{ clearAuthSession(); setRole('student'); localStorage.removeItem('ielts-current-teacher-id'); localStorage.removeItem('ielts-current-student'); }} className="nav-link mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium"><LogOut size={17}/>Sign out</Link>
+        <Link href="/" onClick={()=>{ forceLogout(); setRole('student'); }} className="nav-link mt-1 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium"><LogOut size={17}/>Sign out</Link>
         <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-3">
           <div className="flex items-center gap-2.5">
             <Avatar initials={headerInitials} size="sm" tone="amber"/>
@@ -201,7 +211,7 @@ function BranchSelection() {
   useEffect(() => {
     if (DEMO_MODE) seedDemoWorld();
   }, []);
-  const branches = listBranches();
+  const branches = listBranches().filter((b) => b.isActive !== false);
 
   return (
     <div className="auth-split bg-[#f4efe7]">
@@ -223,8 +233,8 @@ function BranchSelection() {
               Choose your campus.
             </h2>
             {DEMO_MODE && (
-              <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
-                DEMO MODE ON — login bypassed. Use quick enter below (temporary).
+              <p className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-bold uppercase tracking-wide text-amber-950">
+                {DEMO_BANNER_TEXT}
               </p>
             )}
           </div>
@@ -321,7 +331,7 @@ function SuperAdminLogin() {
       const { access_token, user } = await apiLogin(username, password, 'super_admin');
       if (!access_token || !user) throw new Error('Invalid authentication response.');
       if (user.role !== 'super_admin') throw new Error('Not a super admin account.');
-      updateCurrentSuperAdminAccount({ fullName: user.full_name || user.name || user.username });
+      await updateCurrentSuperAdminAccount({ fullName: user.full_name || user.name || user.username });
       await hydrateOrgFromBackend(user);
       setRole('admin');
       setLocation('/admin/dashboard');
@@ -363,7 +373,7 @@ function SuperAdminLogin() {
               </div>
             </div>
             {error && <p className="text-sm text-red-700">{error}</p>}
-            <Button type="submit" className="h-12 w-full bg-blue-600 hover:bg-blue-700">
+            <Button type="submit" disabled={loading} className="h-12 w-full bg-blue-600 hover:bg-blue-700">
               {loading ? 'Authenticating…' : 'Sign in as Super Admin'} {!loading && <ShieldCheck size={17}/>}
             </Button>
           </form>
@@ -438,7 +448,7 @@ function BranchAdminLogin() {
               </div>
             </div>
             {error && <p className="text-sm text-red-700">{error}</p>}
-            <Button type="submit" className="h-12 w-full bg-teal-600 hover:bg-teal-700">
+            <Button type="submit" disabled={loading} className="h-12 w-full bg-teal-600 hover:bg-teal-700">
               {loading ? 'Authenticating…' : 'Sign in as Branch Admin'} {!loading && <ShieldCheck size={17}/>}
             </Button>
           </form>
@@ -495,7 +505,106 @@ function Login() {
       setLoading(false);
     }
   };
-  return <div className="auth-split auth-split-login bg-[#f6f3ee]"><AuthHero eyebrow="FTI IELTS · Welcome back" title="Make every" accent="word count." text="Sign in to practise Writing, Reading, Listening and Speaking. Submit homework, sit mocks, and get estimated AI feedback before class."/><div className="flex min-h-0 min-w-0 items-start justify-center overflow-x-hidden overflow-y-auto px-4 py-6 sm:px-8 sm:py-10 lg:h-full lg:items-center lg:px-10"><div className="w-full max-w-[430px] fade-up"><div className="mb-8"><div className="eyebrow mb-3">Welcome back</div><h2 className="font-display text-[1.7rem] font-bold tracking-tight sm:text-3xl">Your next band is<br/>closer than you think.</h2><p className="mt-2 text-sm text-muted-foreground">Sign in to continue your writing practice.</p></div><form onSubmit={submit} className="space-y-5"><div><label className="mb-2 block text-sm font-semibold" htmlFor="email">{role==='teacher'?'Email or username':'Email or username'}</label><input id="email" data-testid="input-email" type="text" value={email} onChange={e=>setEmail(e.target.value)} className="h-12 w-full rounded-lg border border-input bg-card px-4 text-sm focus:ring-2 focus:ring-ring"/></div><div><div className="mb-2 flex justify-between"><label className="text-sm font-semibold" htmlFor="password">Password</label><button type="button" className="text-xs font-semibold text-primary hover:underline">Forgot password?</button></div><div className="relative"><LockKeyhole size={16} className="absolute left-4 top-4 text-muted-foreground"/><input id="password" data-testid="input-password" type="password" value={password} onChange={e=>setPassword(e.target.value)} className="h-12 w-full rounded-lg border border-input bg-card pl-11 pr-4 text-sm focus:ring-2 focus:ring-ring"/></div></div>{error && <p className="text-sm text-red-700">{error}</p>}<Button type="submit" className="h-12 w-full">{loading?'Opening workspace…':'Sign in'} {!loading && <ArrowUpRight size={17}/>}</Button></form><div className="my-8 flex items-center gap-3"><div className="h-px flex-1 bg-border"/><span className="text-[11px] uppercase tracking-widest text-muted-foreground">Demo access</span><div className="h-px flex-1 bg-border"/></div><div className="space-y-2">{roles.map(item=><button key={item.id} type="button" data-testid={`button-demo-${item.id}`} onClick={()=>{if(item.id==='branch-admin-link'){setLocation('/branch-admin-login');}else{setLoginRole(item.id as Role);setEmail(item.id==='student'?'ali.ahmad@example.com':'nadia.rahman@example.com')}}} className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition ${role===item.id?'border-primary bg-teal-50/60':'border-border bg-card hover:bg-muted'}`}><Avatar initials={item.initials} size="sm" tone={item.id==='branch-admin-link'?'teal':item.id==='teacher'?'amber':'teal'}/><span className="flex-1"><span className="block text-sm font-semibold">{item.label}</span><span className="block text-xs text-muted-foreground">{item.desc}</span></span>{role===item.id && <Check size={16} className="text-primary" />}</button>)}</div><p className="mt-8 text-center text-xs text-muted-foreground">Demo mode is enabled. Choose a workspace above to explore.</p></div></div></div>;
+  return (
+    <div className="auth-split auth-split-login bg-[#f6f3ee]">
+      <AuthHero
+        eyebrow="FTI IELTS · Welcome back"
+        title="Make every"
+        accent="word count."
+        text="Sign in to practise Writing, Reading, Listening and Speaking. Submit homework, sit mocks, and get estimated AI feedback before class."
+      />
+      <div className="flex min-h-0 min-w-0 items-start justify-center overflow-x-hidden overflow-y-auto px-4 py-6 sm:px-8 sm:py-10 lg:h-full lg:items-center lg:px-10">
+        <div className="w-full max-w-[430px] fade-up">
+          <div className="mb-8">
+            <div className="eyebrow mb-3">Welcome back</div>
+            <h2 className="font-display text-[1.7rem] font-bold tracking-tight sm:text-3xl">
+              Your next band is<br />closer than you think.
+            </h2>
+            <p className="mt-2 text-sm text-muted-foreground">Sign in to continue your writing practice.</p>
+          </div>
+          <form onSubmit={submit} className="space-y-5">
+            <div>
+              <label className="mb-2 block text-sm font-semibold" htmlFor="email">Email or username</label>
+              <input
+                id="email"
+                data-testid="input-email"
+                type="text"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="h-12 w-full rounded-lg border border-input bg-card px-4 text-sm focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            <div>
+              <div className="mb-2 flex justify-between">
+                <label className="text-sm font-semibold" htmlFor="password">Password</label>
+                <button type="button" className="text-xs font-semibold text-primary hover:underline">Forgot password?</button>
+              </div>
+              <div className="relative">
+                <LockKeyhole size={16} className="absolute left-4 top-4 text-muted-foreground" />
+                <input
+                  id="password"
+                  data-testid="input-password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="h-12 w-full rounded-lg border border-input bg-card pl-11 pr-4 text-sm focus:ring-2 focus:ring-ring"
+                />
+              </div>
+            </div>
+            {error && <p className="text-sm text-red-700">{error}</p>}
+            <Button type="submit" disabled={loading} className="h-12 w-full">
+              {loading ? 'Opening workspace…' : 'Sign in'} {!loading && <ArrowUpRight size={17} />}
+            </Button>
+          </form>
+          <div className="my-8 flex items-center gap-3">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-[11px] uppercase tracking-widest text-muted-foreground">
+              {DEMO_MODE ? 'Demo access' : 'Sign in as'}
+            </span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
+          <div className="space-y-2">
+            {roles.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                data-testid={`button-demo-${item.id}`}
+                onClick={() => {
+                  if (item.id === 'branch-admin-link') {
+                    setLocation('/branch-admin-login');
+                    return;
+                  }
+                  setLoginRole(item.id as Role);
+                  if (DEMO_MODE) {
+                    setEmail(item.id === 'student' ? 'ali.ahmad@example.com' : 'nadia.rahman@example.com');
+                  }
+                }}
+                className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition ${
+                  role === item.id ? 'border-primary bg-teal-50/60' : 'border-border bg-card hover:bg-muted'
+                }`}
+              >
+                <Avatar
+                  initials={item.initials}
+                  size="sm"
+                  tone={item.id === 'branch-admin-link' ? 'teal' : item.id === 'teacher' ? 'amber' : 'teal'}
+                />
+                <span className="flex-1">
+                  <span className="block text-sm font-semibold">{item.label}</span>
+                  <span className="block text-xs text-muted-foreground">{item.desc}</span>
+                </span>
+                {role === item.id && <Check size={16} className="text-primary" />}
+              </button>
+            ))}
+          </div>
+          <p className="mt-8 text-center text-xs text-muted-foreground">
+            {DEMO_MODE
+              ? 'DEMO MODE — local sandbox only; data is not persisted to the API.'
+              : 'Choose Student or Teacher, then sign in with your real account. Branch Admin uses a separate login page.'}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function StudentDashboard() {
@@ -505,6 +614,8 @@ function StudentDashboard() {
   const today = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
   const [openHomework, setOpenHomework] = useState(0);
   const [openMocks, setOpenMocks] = useState(0);
+  const [analytics, setAnalytics] = useState<StudentAnalytics | null>(null);
+  const [analyticsError, setAnalyticsError] = useState('');
 
   useEffect(() => {
     studentHomework()
@@ -517,7 +628,29 @@ function StudentDashboard() {
         ),
       )
       .catch(() => setOpenMocks(0));
+    if (!DEMO_MODE) {
+      fetchStudentAnalytics()
+        .then((d) => {
+          setAnalytics(d);
+          setAnalyticsError('');
+          setOpenHomework(d.homework?.open ?? 0);
+          setOpenMocks(d.mocks?.open ?? 0);
+        })
+        .catch((e) => {
+          setAnalytics(null);
+          setAnalyticsError(e instanceof Error ? e.message : 'Could not load progress');
+        });
+    }
   }, []);
+
+  const skillCards = analytics
+    ? [
+        ['Reading', analytics.skills.reading.latest_band ?? analytics.skills.reading.average_band],
+        ['Listening', analytics.skills.listening.latest_band ?? analytics.skills.listening.average_band],
+        ['Writing', analytics.skills.writing.latest_band ?? analytics.skills.writing.average_band],
+        ['Speaking', analytics.skills.speaking.latest_band ?? analytics.skills.speaking.average_band],
+      ] as const
+    : null;
 
   return (
     <>
@@ -529,7 +662,7 @@ function StudentDashboard() {
       />
       {(me.batch || me.track) && (
         <div className="mb-7 flex flex-wrap items-center gap-3 text-xs">
-          {me.track && <Badge tone="teal">{me.track}</Badge>}
+          {me.track && <Badge tone="blue">{me.track}</Badge>}
           {me.batch && <span className="text-muted-foreground">{me.batch}</span>}
         </div>
       )}
@@ -544,6 +677,37 @@ function StudentDashboard() {
           <StatCard label="IELTS Practice" value="Go" detail="Reading · Listening · Writing · Speaking" icon={<PencilLine size={17} />} />
         </button>
       </div>
+      {!DEMO_MODE && (
+        <div className="mt-6">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <div className="eyebrow">Your skill progress</div>
+              <h2 className="font-display mt-1 text-lg font-bold">Latest bands (DB-backed)</h2>
+            </div>
+            <Link href="/student/results" className="text-xs font-bold text-primary">All results</Link>
+          </div>
+          {analyticsError ? (
+            <p className="text-sm text-red-700">{analyticsError}</p>
+          ) : skillCards ? (
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {skillCards.map(([label, band]) => (
+                <StatCard
+                  key={label}
+                  label={label}
+                  value={formatBand(band)}
+                  detail={band == null ? 'No submitted result yet' : 'Latest effective band'}
+                  icon={<Target size={17} />}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Loading skill progress…</p>
+          )}
+          <p className="mt-2 text-xs text-muted-foreground">
+            Skill averages only — not a four-skill IELTS overall. Missing scores show as — , never Band 0.
+          </p>
+        </div>
+      )}
       <div className="mt-6">
         <div className="card p-6">
           <div className="mb-5 flex items-center justify-between">
@@ -596,8 +760,8 @@ function StudentSupporting({ page }: {page:string}) {
   const c=configs[page]||configs.results;
   return <><SectionTitle eyebrow={c.eyebrow} title={c.title} description={c.desc}/>{page==='results'?<ResultsContent/>:page==='history'?<HistoryContent query={query} setQuery={setQuery}/>:<Profile onToast={setToast}/>} {toast&&<Toast message={toast} onClose={()=>setToast('')}/>}</>;
 }
-function ResultsContent(){ const published=getPublishedReview(); return <div className="space-y-6"><div><div className="mb-3 flex items-center gap-2"><div className="eyebrow">Teacher-reviewed</div><Badge tone="green">{published?'Published':'Reviewed Jun 9'}</Badge></div><div className="card p-5 sm:p-6"><div className="flex flex-wrap items-start justify-between gap-4"><div><h2 className="font-display text-lg font-bold">Technology in the workplace</h2><p className="mt-1 text-xs text-muted-foreground">Task 2 · Submitted Jun 7 · Nadia Rahman</p></div><div className="metric-number text-4xl font-bold">6.5</div></div><div className="mt-6 grid grid-cols-2 gap-x-8 gap-y-4 sm:grid-cols-4">{[['Task response','7.0'],['Coherence','6.5'],['Lexical resource','6.0'],['Grammar','6.5']].map(([a,b])=><div key={a}><div className="text-xs text-muted-foreground">{a}</div><div className="mt-1 font-display text-xl font-bold">{b}</div></div>)}</div><div className="mt-6 border-t border-border pt-4"><div className="eyebrow">Nadia’s feedback</div><p className="mt-2 text-sm leading-6 text-muted-foreground">Clear position and a logical structure. To move towards band 7, make your supporting examples more specific and watch article use in longer sentences.</p></div></div></div><div><div className="mb-3 flex items-center gap-2"><div className="eyebrow">AI estimated</div><Badge tone="blue">Practice only</Badge></div><div className="card p-5 sm:p-6"><div className="flex items-center justify-between"><div><h2 className="font-display text-lg font-bold">Globalisation and local culture</h2><p className="mt-1 text-xs text-muted-foreground">Practice mode · Jun 5</p></div><div className="metric-number text-4xl font-bold text-sky-700">6.0</div></div><p className="mt-5 border-t border-border pt-4 text-xs leading-5 text-muted-foreground">AI estimates are directional practice feedback and are not teacher results.</p></div></div></div>; }
-function HistoryContent({query,setQuery}:{query:string;setQuery:(v:string)=>void}){ const rows=assignments.filter(a=>a.title.toLowerCase().includes(query.toLowerCase())); return <><div className="mb-4"><SearchInput value={query} onChange={setQuery} placeholder="Search your writing"/></div><div className="card overflow-hidden"><div className="mobile-scroll"><div className="min-w-[680px]"><div className="grid grid-cols-[1.4fr_.6fr_.7fr_.7fr] gap-4 bg-muted/60 px-5 py-3 text-[11px] font-bold uppercase tracking-wider text-muted-foreground"><span>Response</span><span>Type</span><span>Status</span><span>Date</span></div>{rows.map(a=><div key={a.id} className="data-row grid grid-cols-[1.4fr_.6fr_.7fr_.7fr] items-center gap-4 px-5 py-4 text-sm"><div><div className="font-semibold">{a.title}</div><div className="mt-1 text-xs text-muted-foreground">{a.task}</div></div><span className="text-muted-foreground">{a.type}</span><StatusBadge status={a.status==='Completed'?'Teacher-reviewed':'Awaiting review'}/><span className="text-xs text-muted-foreground">{a.submitted||'—'}</span></div>)}</div></div></div></>; }
+function ResultsContent(){ return <StudentResultsLive/>; }
+function HistoryContent({query,setQuery}:{query:string;setQuery:(v:string)=>void}){ return <><div className="mb-4"><SearchInput value={query} onChange={setQuery} placeholder="Search your writing"/></div><StudentHistoryLive query={query}/></>; }
 function Profile({onToast}:{onToast:(v:string)=>void}){
   const current = getCurrentStudent();
   const account = getStudentAccount(current.id);
@@ -611,7 +775,7 @@ function Profile({onToast}:{onToast:(v:string)=>void}){
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
 
-  const save = (e: FormEvent) => {
+  const save = async (e: FormEvent) => {
     e.preventDefault();
     const nextUsername = username.trim();
     if (nextUsername.length < 3) { setError('Username must be at least 3 characters.'); return; }
@@ -627,22 +791,45 @@ function Profile({onToast}:{onToast:(v:string)=>void}){
     const patch: Record<string, string> = { username: nextUsername };
     if (newPassword || confirmPassword) {
       if (!currentPassword) { setError('Enter your current password to change it.'); return; }
-      if (!account || currentPassword !== account.password) { setError('Current password is incorrect.'); return; }
       if (newPassword.length < 6) { setError('Password must be at least 6 characters.'); return; }
       if (newPassword !== confirmPassword) { setError('Passwords do not match.'); return; }
-      patch.password = newPassword;
+      // Password changes go through /auth/change-password (verified server-side).
+      // Do not compare against localStorage plaintext — staging never stores it.
     }
 
-    const saved = updateStudentAccount(current.id, patch);
-    if (!saved) { setError('Could not save your account.'); return; }
-    setCurrentStudent({ ...current, username: nextUsername });
-    setCurrentPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
-    setError('');
-    onToast(patch.password
-      ? 'Username and password saved. Use these details next time you sign in.'
-      : 'Username saved. Use this username next time you sign in.');
+    try {
+      if (newPassword) {
+        const { authHeaders } = await import('@/lib/auth-api');
+        const { apiBase } = await import('@/lib/api-base');
+        const { DEMO_MODE } = await import('@/lib/demo-mode');
+        if (!DEMO_MODE) {
+          const res = await fetch(`${apiBase()}/auth/change-password`, {
+            method: 'POST',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+          });
+          if (!res.ok) {
+            let detail = `HTTP ${res.status}`;
+            try { const body = await res.json(); detail = body.detail || detail; } catch { /* ignore */ }
+            throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+          }
+        } else {
+          patch.password = newPassword;
+        }
+      }
+      const saved = await updateStudentAccount(current.id, patch);
+      if (!saved) { setError('Could not save your account.'); return; }
+      setCurrentStudent({ ...current, username: nextUsername });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setError('');
+      onToast(newPassword
+        ? 'Username and password saved. Use these details next time you sign in.'
+        : 'Username saved. Use this username next time you sign in.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save your account.');
+    }
   };
 
   return (
@@ -698,29 +885,80 @@ function TeacherDashboard() {
   const [, setLocation] = useLocation();
   const teacher = getCurrentTeacher();
   const firstName = (teacher.fullName || teacher.name || 'Nadia').split(' ')[0];
-  const teacherBatches = ['Morning Batch A', 'Morning Batch B'];
-  const snapshotData = teacherBatches.map((batchName) => {
-    const batchStudents = listTeacherRoster().filter((s) => s.batch === batchName);
-    const count = batchStudents.length;
-    const avg = count > 0 ? (batchStudents.reduce((acc, s) => acc + s.band, 0) / count).toFixed(1) : 'N/A';
-    const status = parseFloat(avg) >= 6.5 ? 'On track' : 'Needs attention';
-    return [batchName, count.toString(), avg, status];
-  });
-  const queue = listTeacherRoster().filter((s) => teacherBatches.includes(s.batch)).slice(0, 4);
+  const [stats, setStats] = useState<TeacherAnalytics | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(!DEMO_MODE);
+
+  useEffect(() => {
+    if (DEMO_MODE) {
+      setLoading(false);
+      return;
+    }
+    fetchTeacherAnalytics()
+      .then((d) => {
+        setStats(d);
+        setError('');
+      })
+      .catch((e) => {
+        setStats(null);
+        setError(e instanceof Error ? e.message : 'Could not load analytics');
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const rosterFallback = listTeacherRoster();
+  const teacherBatches = stats?.batches?.length
+    ? stats.batches.map((b) => b.name)
+    : Array.from(new Set(rosterFallback.map((s) => s.batch).filter(Boolean)));
+  const snapshotData = (stats?.batches?.length
+    ? stats.batches.map((b) => [b.name, String(b.active_students), '—', b.active_students ? 'On track' : 'Needs attention'] as const)
+    : teacherBatches.map((batchName) => {
+        const batchStudents = rosterFallback.filter((s) => s.batch === batchName);
+        const count = batchStudents.length;
+        return [batchName, count.toString(), '—', count ? 'On track' : 'Needs attention'] as const;
+      }));
 
   return (
     <>
       <SectionTitle
         eyebrow="Teacher workspace"
         title={`Good morning, ${firstName}.`}
-        description={`Here’s what needs your attention across ${teacherBatches.join(' and ')}.`}
+        description={
+          teacherBatches.length
+            ? `Here’s what needs your attention across ${teacherBatches.slice(0, 3).join(', ')}.`
+            : 'Campus dashboard for your branch.'
+        }
         action={<Button onClick={() => setLocation('/teacher/homework/new')}><Plus size={16} />Create homework</Button>}
       />
+      {error && <p className="mb-4 text-sm text-red-700">{error}</p>}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Pending reviews" value="12" detail="4 due today" icon={<FileText size={17} />} accent="amber" />
-        <StatCard label="Active students" value={snapshotData.reduce((acc, r) => acc + parseInt(r[1], 10), 0).toString()} detail={`Across ${teacherBatches.length} batches`} icon={<Users size={17} />} />
-        <StatCard label="Average band" value="6.4" detail="+0.3 this month" icon={<Target size={17} />} accent="blue" />
-        <StatCard label="Active homework" value="7" detail="2 closing this week" icon={<ClipboardCheck size={17} />} accent="amber" />
+        <StatCard
+          label="Pending reviews"
+          value={loading ? '…' : String(stats?.pending_reviews ?? (DEMO_MODE ? '—' : 0))}
+          detail="Homework awaiting teacher review"
+          icon={<FileText size={17} />}
+          accent="amber"
+        />
+        <StatCard
+          label="Active students"
+          value={loading ? '…' : String(stats?.active_students ?? rosterFallback.length)}
+          detail={stats?.active_students_label || `Across ${teacherBatches.length || 0} batches`}
+          icon={<Users size={17} />}
+        />
+        <StatCard
+          label="Skill average"
+          value={loading ? '…' : formatBand(stats?.skill_average_band)}
+          detail={stats?.skill_average_note || 'Campus skill mean — not IELTS overall'}
+          icon={<Target size={17} />}
+          accent="blue"
+        />
+        <StatCard
+          label="Active homework"
+          value={loading ? '…' : String(stats?.active_homework ?? (DEMO_MODE ? '—' : 0))}
+          detail="Assignments you created"
+          icon={<ClipboardCheck size={17} />}
+          accent="amber"
+        />
       </div>
       <div className="mt-6 grid gap-6 xl:grid-cols-[1.15fr_.85fr]">
         <div className="card p-6">
@@ -732,14 +970,19 @@ function TeacherDashboard() {
             <Link href="/teacher/reviews" className="text-xs font-bold text-primary">See queue</Link>
           </div>
           <div className="mt-5 space-y-3">
-            {queue.map((s, i) => (
-              <Link href="/teacher/reviews/1021" key={s.id} className="flex items-center gap-3 rounded-lg p-2 hover:bg-muted">
-                <Avatar initials={s.initials} size="sm" />
+            {(stats?.recent_pending_reviews || []).length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                {loading ? 'Loading…' : 'No submissions waiting for review.'}
+              </p>
+            )}
+            {(stats?.recent_pending_reviews || []).map((item) => (
+              <Link href="/teacher/reviews" key={item.submission_id} className="flex items-center gap-3 rounded-lg p-2 hover:bg-muted">
+                <Avatar initials={(item.student_name || 'ST').slice(0, 2).toUpperCase()} size="sm" />
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold">{s.name}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{i % 2 ? 'Technology in the workplace' : 'Urban transport…'}</span>
+                  <span className="block text-sm font-semibold">{item.student_name}</span>
+                  <span className="block truncate text-xs text-muted-foreground">{item.title}</span>
                 </span>
-                <span className="text-xs text-amber-700">{i + 1}d</span>
+                <span className="text-xs text-amber-700">Review</span>
               </Link>
             ))}
           </div>
@@ -753,11 +996,12 @@ function TeacherDashboard() {
             <Link href="/teacher/batches" className="text-xs font-bold text-primary">View batches</Link>
           </div>
           <div className="space-y-3">
+            {snapshotData.length === 0 && <p className="text-sm text-muted-foreground">No batches on this campus yet.</p>}
             {snapshotData.map((r) => (
               <Link key={r[0]} href={`/teacher/batches/${encodeURIComponent(r[0])}`} className="flex items-center justify-between rounded-lg border border-border p-3 hover:bg-muted/40">
                 <div>
                   <div className="text-sm font-semibold">{r[0]}</div>
-                  <div className="mt-0.5 text-xs text-muted-foreground">{r[1]} students · avg {r[2]}</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">{r[1]} active students</div>
                 </div>
                 <StatusBadge status={r[3]} />
               </Link>
@@ -769,21 +1013,80 @@ function TeacherDashboard() {
   );
 }
 
-function TeacherTablePage({page}:{page:string}){ const [query,setQuery]=useState(''); const [toast,setToast]=useState(''); const [,setLocation]=useLocation(); const [selectedBatch, setSelectedBatch]=useState('All batches'); const titles:Record<string,[string,string]>={batches:['Batches','Keep each cohort moving together.'],students:['Students','Find a learner, see their recent work, and guide the next step.'],homework:['Homework','Create, schedule, and follow assignments across your batches.'],reviews:['Review queue','12 responses are waiting for your expert eye.'],results:['Results','Your published feedback and student outcomes.'],reports:['Reports','Turn classroom activity into a clear next move.']}; const t=titles[page]||titles.students; if(page==='reviews') return <ReviewQueue/>; if(page==='reports') return <Reports/>; if(page==='students') return <TeacherStudentsList/>; const roster=listTeacherRoster(); const filtered=roster.filter(s=>(s.name.toLowerCase().includes(query.toLowerCase())||s.batch.toLowerCase().includes(query.toLowerCase())||(s.username||s.email).toLowerCase().includes(query.toLowerCase())) && (selectedBatch === 'All batches' || s.batch === selectedBatch)); const uniqueBatches = Array.from(new Set(roster.map(s => s.batch))); return <><SectionTitle eyebrow="Teacher workspace" title={t[0]} description={t[1]} action={page==='homework'?<Button onClick={()=>setLocation('/teacher/homework/new')}><Plus size={16}/>New homework</Button>:page==='students'?<Button onClick={()=>setLocation('/teacher/students/new')}><Plus size={16}/>Add student</Button>:undefined}/><div className="mb-5 flex flex-wrap items-center justify-between gap-3"><SearchInput value={query} onChange={setQuery} placeholder={page==='batches'?'Search batches':'Search students'}/><div className="flex gap-2"><select value={selectedBatch} onChange={e=>setSelectedBatch(e.target.value)} className="h-9 rounded-lg border border-input bg-card px-2 text-sm font-semibold"><option value="All batches">All batches</option>{uniqueBatches.map(b=><option key={b} value={b}>{b}</option>)}</select></div></div>{page==='batches'?<div className="grid gap-4 md:grid-cols-3">{[['Morning Batch A','18 learners','6.6 avg','Mon · Wed · Fri'],['Morning Batch B','14 learners','6.1 avg','Tue · Thu'],['Evening Batch A','10 learners','6.4 avg','Mon · Thu']].map((r,i)=><Link href={`/teacher/batches/${encodeURIComponent(r[0])}`} className="card p-5 block hover:border-primary transition" key={r[0]}><div className="flex items-start justify-between"><div className="rounded-lg bg-teal-50 p-2 text-primary"><Users size={18}/></div><MoreHorizontal size={17} className="text-muted-foreground"/></div><h2 className="mt-5 font-display text-lg font-bold">{r[0]}</h2><p className="mt-1 text-xs text-muted-foreground">{r[3]}</p><div className="mt-5 flex justify-between text-sm"><span className="text-muted-foreground">{r[1]}</span><strong>{r[2]}</strong></div><ProgressBar value={i===1?62:78}/></Link>)}</div>:page==='homework'?<HomeworkTeacher onToast={setToast}/>:page==='results'?<ResultsTeacher/>:<div className="card overflow-hidden"><div className="mobile-scroll"><div className="min-w-[780px]"><div className="grid grid-cols-[1.3fr_1.2fr_.7fr_.7fr_.5fr] gap-4 bg-muted/60 px-5 py-3 text-[11px] font-bold uppercase tracking-wider text-muted-foreground"><span>Student</span><span>Batch</span><span>Band</span><span>Trend</span><span>Action</span></div>{filtered.map(s=><button type="button" key={s.id} onClick={()=>setLocation(page === 'students' ? `/teacher/students/${s.id}` : '/teacher/reviews/1021')} className="data-row grid w-full grid-cols-[1.3fr_1.2fr_.7fr_.7fr_.5fr] items-center gap-4 px-5 py-4 text-left text-sm hover:bg-muted/50"><div className="flex items-center gap-3"><Avatar initials={s.initials} size="sm"/><div><div className="font-semibold">{s.name}</div><div className="text-xs text-muted-foreground">ID {s.username || s.email.split('@')[0]}</div></div></div><span className="text-muted-foreground">{s.batch}</span><strong>{s.band > 0 ? s.band.toFixed(1) : '—'}</strong><span className={s.trend.startsWith('+')?'text-emerald-700':s.trend.startsWith('-')?'text-red-700':'text-muted-foreground'}>{s.trend}</span><span className="text-xs font-bold text-primary">{page==='students'?'Open record':'Open'}</span></button>)}</div></div></div>}{toast&&<Toast message={toast} onClose={()=>setToast('')}/>}</>; }
+function TeacherTablePage({page}:{page:string}){ const [query,setQuery]=useState(''); const [toast,setToast]=useState(''); const [,setLocation]=useLocation(); const [selectedBatch, setSelectedBatch]=useState('All batches'); const titles:Record<string,[string,string]>={batches:['Batches','Keep each cohort moving together.'],students:['Students','Find a learner, see their recent work, and guide the next step.'],homework:['Homework','Create, schedule, and follow assignments across your batches.'],reviews:['Review queue','Homework submissions waiting for your review.'],results:['Results','Your published feedback and student outcomes.'],reports:['Reports','Turn classroom activity into a clear next move.']}; const t=titles[page]||titles.students; if(page==='reviews') return <ReviewQueue/>; if(page==='reports') return <Reports/>; if(page==='students') return <TeacherStudentsList/>; const roster=listTeacherRoster(); const filtered=roster.filter(s=>(s.name.toLowerCase().includes(query.toLowerCase())||s.batch.toLowerCase().includes(query.toLowerCase())||(s.username||s.email).toLowerCase().includes(query.toLowerCase())) && (selectedBatch === 'All batches' || s.batch === selectedBatch)); const uniqueBatches = Array.from(new Set(roster.map(s => s.batch).filter(Boolean))); return <><SectionTitle eyebrow="Teacher workspace" title={t[0]} description={t[1]} action={page==='homework'?<Button onClick={()=>setLocation('/teacher/homework/new')}><Plus size={16}/>New homework</Button>:page==='students'?<Button onClick={()=>setLocation('/teacher/students/new')}><Plus size={16}/>Add student</Button>:undefined}/><div className="mb-5 flex flex-wrap items-center justify-between gap-3"><SearchInput value={query} onChange={setQuery} placeholder={page==='batches'?'Search batches':'Search students'}/><div className="flex gap-2"><select value={selectedBatch} onChange={e=>setSelectedBatch(e.target.value)} className="h-9 rounded-lg border border-input bg-card px-2 text-sm font-semibold"><option value="All batches">All batches</option>{uniqueBatches.map(b=><option key={b} value={b}>{b}</option>)}</select></div></div>{page==='batches'?<div className="grid gap-4 md:grid-cols-3">{uniqueBatches.length===0?<p className="text-sm text-muted-foreground">No batches yet — add students with a batch name.</p>:uniqueBatches.map((name)=>{const count=roster.filter(s=>s.batch===name).length; return <Link href={`/teacher/batches/${encodeURIComponent(name)}`} className="card p-5 block hover:border-primary transition" key={name}><div className="flex items-start justify-between"><div className="rounded-lg bg-teal-50 p-2 text-primary"><Users size={18}/></div><MoreHorizontal size={17} className="text-muted-foreground"/></div><h2 className="mt-5 font-display text-lg font-bold">{name}</h2><p className="mt-1 text-xs text-muted-foreground">Campus roster</p><div className="mt-5 flex justify-between text-sm"><span className="text-muted-foreground">{count} learners</span><strong>—</strong></div></Link>;})}</div>:page==='homework'?<HomeworkTeacher onToast={setToast}/>:page==='results'?<ResultsTeacher/>:<div className="card overflow-hidden"><div className="mobile-scroll"><div className="min-w-[780px]"><div className="grid grid-cols-[1.3fr_1.2fr_.7fr_.7fr_.5fr] gap-4 bg-muted/60 px-5 py-3 text-[11px] font-bold uppercase tracking-wider text-muted-foreground"><span>Student</span><span>Batch</span><span>Band</span><span>Trend</span><span>Action</span></div>{filtered.map(s=><button type="button" key={s.id} onClick={()=>setLocation(page === 'students' ? `/teacher/students/${s.id}` : '/teacher/reviews')} className="data-row grid w-full grid-cols-[1.3fr_1.2fr_.7fr_.7fr_.5fr] items-center gap-4 px-5 py-4 text-left text-sm hover:bg-muted/50"><div className="flex items-center gap-3"><Avatar initials={s.initials} size="sm"/><div><div className="font-semibold">{s.name}</div><div className="text-xs text-muted-foreground">ID {s.username || s.email.split('@')[0]}</div></div></div><span className="text-muted-foreground">{s.batch}</span><strong>{s.band > 0 ? s.band.toFixed(1) : '—'}</strong><span className={s.trend.startsWith('+')?'text-emerald-700':s.trend.startsWith('-')?'text-red-700':'text-muted-foreground'}>{s.trend==='0'||!s.trend?'—':s.trend}</span><span className="text-xs font-bold text-primary">{page==='students'?'Open record':'Open'}</span></button>)}</div></div></div>}{toast&&<Toast message={toast} onClose={()=>setToast('')}/>}</>; }
 function HomeworkTeacher({onToast}:{onToast:(s:string)=>void}){ return <HomeworkTeacherList onToast={onToast}/>; }
-function ResultsTeacher(){return <div className="card overflow-hidden"><div className="mobile-scroll"><div className="min-w-[680px]"><div className="grid grid-cols-[1.3fr_1fr_.6fr_.7fr] gap-4 bg-muted/60 px-5 py-3 text-[11px] font-bold uppercase tracking-wider text-muted-foreground"><span>Published result</span><span>Student</span><span>Band</span><span>Date</span></div>{students.slice(0,5).map(s=><div className="data-row grid grid-cols-[1.3fr_1fr_.6fr_.7fr] items-center gap-4 px-5 py-4 text-sm" key={s.id}><div className="font-semibold">Technology in the workplace</div><div className="flex items-center gap-2"><Avatar initials={s.initials} size="sm"/>{s.name}</div><strong>{s.band.toFixed(1)}</strong><span className="text-xs text-muted-foreground">Jun 9, 2025</span></div>)}</div></div></div>;}
+function ResultsTeacher(){ return <TeacherResultsLive/>; }
 function ReviewQueue(){ return <ReviewQueueLive/>; }
 function TeacherCreateHomeworkPage() { return <HomeworkComposer/>; }
 function NotFound(){ return <div className="flex min-h-[70dvh] flex-col items-center justify-center text-center"><div className="eyebrow">404 · Not in the syllabus</div><h1 className="mt-3 font-display text-4xl font-bold">This page took a wrong turn.</h1><Link href="/student/dashboard" className="btn-primary mt-6 rounded-lg px-5 py-3 text-sm font-bold">Back to workspace</Link></div>; }
 function RoutedErrorBoundary({children}:{children:ReactNode}){const [location]=useLocation();return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;}
-function AppRouter(){ const [location]=useLocation();
+function DemoSandboxBanner() {
+  if (!DEMO_MODE) return null;
+  return (
+    <div
+      role="status"
+      className="sticky top-0 z-[60] border-b border-amber-400 bg-amber-300 px-3 py-2 text-center text-[11px] font-bold uppercase tracking-[0.14em] text-amber-950"
+    >
+      {DEMO_BANNER_TEXT}
+    </div>
+  );
+}
+
+function AppRouter(){
+  const [location]=useLocation();
+  useEffect(() => {
+    purgeDemoSessionIfDisabled();
+  }, []);
+  // Staging: on reload (or after org cache clear), re-hydrate from API using JWT.
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    const token = getAccessToken();
+    if (!token || isDemoToken(token)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const user = await apiMe();
+        if (cancelled || !user) return;
+        setRole(mapAuthRoleToUi(user.role));
+        if (user.role === 'student') {
+          setCurrentStudent({
+            id: user.id,
+            name: user.full_name || user.name || user.username,
+            batch: user.batch || '',
+            email: user.email,
+            username: user.username,
+          });
+          localStorage.setItem('writing_student_id', user.id);
+        }
+        await hydrateOrgFromBackend(user);
+      } catch (err) {
+        // Only destroy session on real auth failure — not transient network/5xx.
+        const kind = err && typeof err === 'object' && 'kind' in err ? (err as { kind?: string }).kind : undefined;
+        if (!cancelled && (kind === 'unauthorized' || kind === 'invalid')) {
+          forceLogout();
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const isPublic = location==='/' || location==='/login' || location==='/super-admin-login' || location==='/branch-admin-login';
-  if (!DEMO_MODE && !isPublic && !getAccessToken()) {
+  const token = getAccessToken();
+  const hasRealSession = Boolean(token) && !isDemoToken(token);
+  const authUser = getAuthUser();
+  if (!DEMO_MODE && !isPublic && !hasRealSession) {
+    if (token && isDemoToken(token)) purgeDemoSessionIfDisabled();
     if (location.startsWith('/admin')) return <Redirect href="/super-admin-login" />;
     if (location.startsWith('/branch-admin')) return <Redirect href="/branch-admin-login" />;
     return <Redirect href="/login" />;
   }
-  const role:Role=location.startsWith('/admin')?'admin':location.startsWith('/branch-admin')?'branch-admin':location.startsWith('/teacher')?'teacher':'student'; const page = location.split('/').filter(Boolean).at(-1); 
+  // Role shell must follow authenticated user, not URL conventions.
+  if (!DEMO_MODE && hasRealSession && authUser && !isPublic && !pathAllowedForUser(location, authUser)) {
+    return <Redirect href={homePathForRole(authUser.role)} />;
+  }
+  const role: Role = (!DEMO_MODE && authUser?.role)
+    ? mapAuthRoleToUi(authUser.role)
+    : (location.startsWith('/admin') ? 'admin' : location.startsWith('/branch-admin') ? 'branch-admin' : location.startsWith('/teacher') ? 'teacher' : 'student');
+  const page = location.split('/').filter(Boolean).at(-1); 
   if(location==='/') return <BranchSelection/>;
   if(location==='/login') return <Login/>; 
   if(location==='/super-admin-login') return <SuperAdminLogin/>;
@@ -832,6 +1135,7 @@ function AppRouter(){ const [location]=useLocation();
   else if(location==='/teacher/reviews/1021')content=<ReviewPage/>; 
   else if(location==='/admin/dashboard')content=<AdminDashboard/>; 
   else if(location==='/admin/branches/new')content=<AddBranchPage/>;
+  else if(location==='/admin/branch-admins/new')content=<AddBranchAdminPage/>;
   else if(location==='/admin/practice-papers/new')content=<AddPracticePaperPage/>;
   else if(location.startsWith('/admin/branches/')) {
     const branchId = location.split('/').pop() || '';
@@ -861,5 +1165,19 @@ function AppRouter(){ const [location]=useLocation();
   else content=<NotFound/>; 
   return <Shell role={role}>{content}</Shell>; 
 }
-function App(){return <QueryClientProvider client={queryClient}><TooltipProvider><WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/,'')}><RoutedErrorBoundary><AppRouter/></RoutedErrorBoundary></WouterRouter><Toaster/></TooltipProvider></QueryClientProvider>;}
+function App(){
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/,'')}>
+          <DemoSandboxBanner />
+          <RoutedErrorBoundary>
+            <AppRouter/>
+          </RoutedErrorBoundary>
+        </WouterRouter>
+        <Toaster/>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
 export default App;

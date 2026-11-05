@@ -1,38 +1,42 @@
 import { getCurrentStudent } from '@/lib/mock-api';
-import { authHeaders } from '@/lib/auth-api';
+import { authHeaders, clearAuthSession, getAuthUser } from '@/lib/auth-api';
 import { apiBase } from '@/lib/api-base';
+import { messageFromErrorBody, parseJsonBody } from '@/lib/api-errors';
+import { getCanonicalStudentId } from '@/lib/identity';
 
 function headers(extra?: Record<string, string>) {
+  const user = getAuthUser();
   const me = getCurrentStudent();
+  const id = getCanonicalStudentId() || (user?.role === 'student' ? user.id : '') || '';
   return {
     ...authHeaders(),
-    ...(me.id ? { 'X-Student-Id': me.id } : {}),
-    ...(me.batch ? { 'X-Student-Batch': me.batch } : {}),
-    ...(me.name ? { 'X-Student-Name': me.name } : {}),
+    ...(id ? { 'X-Student-Id': id } : {}),
+    ...(me.batch || user?.batch ? { 'X-Student-Batch': me.batch || user?.batch || '' } : {}),
+    ...(me.name || user?.full_name ? { 'X-Student-Name': me.name || user?.full_name || '' } : {}),
     ...extra,
   };
 }
 
 async function notes<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
-    ...options,
-    headers: {
-      ...headers(options?.body instanceof FormData ? undefined : options?.body ? { 'Content-Type': 'application/json' } : undefined),
-      ...(options?.headers as Record<string, string> | undefined),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}${path}`, {
+      ...options,
+      headers: {
+        ...headers(options?.body instanceof FormData ? undefined : options?.body ? { 'Content-Type': 'application/json' } : undefined),
+        ...(options?.headers as Record<string, string> | undefined),
+      },
+    });
+  } catch {
+    throw new Error('Cannot connect to server. Make sure the backend is running.');
+  }
+  if (res.status === 401) clearAuthSession();
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    const body = await parseJsonBody(res);
+    throw new Error(messageFromErrorBody(body, res.status));
   }
   if (res.status === 204) return {} as T;
-  return res.json();
+  return (await parseJsonBody(res)) as T;
 }
 
 export type TeacherNote = {
@@ -97,15 +101,10 @@ export function studentNoteMeta(id: string) {
 
 export async function studentNotePageUrl(id: string, page: number) {
   const res = await fetch(`${apiBase()}/notes/student/${id}/page/${page}`, { headers: headers() });
+  if (res.status === 401) clearAuthSession();
   if (!res.ok) {
-    let detail = 'This page is locked.';
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(typeof detail === 'string' ? detail : 'Locked');
+    const body = await parseJsonBody(res);
+    throw new Error(messageFromErrorBody(body, res.status) || 'This page is locked.');
   }
   return URL.createObjectURL(await res.blob());
 }

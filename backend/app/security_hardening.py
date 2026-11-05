@@ -31,6 +31,11 @@ class SlidingWindowRateLimiter:
             q.append(now)
             return True
 
+    def reset(self) -> None:
+        """Clear counters (used by the test suite so login matrices do not trip 429)."""
+        with self._lock:
+            self._hits.clear()
+
 
 login_limiter = SlidingWindowRateLimiter(max_hits=20, window_seconds=60.0)
 ai_limiter = SlidingWindowRateLimiter(max_hits=30, window_seconds=60.0)

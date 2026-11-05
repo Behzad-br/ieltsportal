@@ -57,7 +57,10 @@ export default function MockExamsHub({ tab }: { tab?: string }) {
                 <p className="mt-3 text-sm text-muted-foreground">Starts in {String(left.days).padStart(2, '0')} days {String(left.hours).padStart(2, '0')} hours {String(left.minutes).padStart(2, '0')} minutes</p>
               )}
               {item.inbox_status === 'results' && (
-                <p className="mt-3 text-sm">Overall <strong>{item.overall_band ?? '—'}</strong> · L {item.listening_band ?? '—'} · R {item.reading_band ?? '—'} · W {item.writing_band ?? '—'} · S {item.speaking_band ?? '—'}</p>
+                <p className="mt-3 text-sm">
+                  {item.result_label || 'Skill band'}{' '}
+                  <strong>{item.skill_band ?? item.overall_band ?? '—'}</strong>
+                </p>
               )}
               <Button className="mt-4" variant={item.inbox_status === 'available' || item.inbox_status === 'in_progress' ? 'primary' : 'quiet'} onClick={() => setLocation(`/student/mocks/${item.id}`)}>
                 {item.inbox_status === 'available' ? 'Start mock' : item.inbox_status === 'in_progress' ? 'Continue' : 'View mock'}

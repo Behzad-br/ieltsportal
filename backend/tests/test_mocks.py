@@ -150,8 +150,41 @@ def test_autosave_and_teacher_publish(client, db):
     assert row["overall_band"] is not None
 
 
-def test_livekit_token_missing_assignment_is_not_found(client):
-    response = client.post("/api/mocks/livekit/token", headers=_headers(), json={"role": "student"})
+def test_livekit_token_missing_assignment_is_not_found(client, monkeypatch):
+    from app.auth.models import Branch, User
+    from app.auth.security import create_access_token, hash_password
+    from app.config import settings
+    from tests.conftest import _TestSessionFactory
+
+    monkeypatch.setattr(settings, "AUTH_LEGACY_HEADERS", False)
+    db = _TestSessionFactory()
+    try:
+        if not db.query(Branch).filter_by(id="m-livekit").first():
+            db.add(Branch(id="m-livekit", name="LK", city="LK", is_active=True))
+        uid = "stu-livekit-miss"
+        if not db.query(User).filter_by(id=uid).first():
+            db.add(
+                User(
+                    id=uid,
+                    role="student",
+                    email="lkmiss@test.local",
+                    username="lkmiss",
+                    password_hash=hash_password("Passw0rd!"),
+                    full_name="LK",
+                    branch_id="m-livekit",
+                    batch="Morning",
+                    is_active=True,
+                )
+            )
+        db.commit()
+        token = create_access_token(sub=uid, role="student", extra={"branch_id": "m-livekit"})
+    finally:
+        db.close()
+    response = client.post(
+        "/api/mocks/livekit/token",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"role": "student"},
+    )
     assert response.status_code in (200, 404)
     if response.status_code == 200:
         assert response.json().get("enabled") is False

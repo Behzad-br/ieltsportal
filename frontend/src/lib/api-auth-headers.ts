@@ -1,11 +1,9 @@
 /** Shared authenticated fetch for skill APIs. */
-import { authHeaders, getAuthUser } from '@/lib/auth-api';
-import { getCurrentStudent } from '@/lib/mock-api';
+import { authHeaders } from '@/lib/auth-api';
+import { getCanonicalStudentId, getCanonicalTeacherId } from '@/lib/identity';
 
 export function studentAuthHeaders(): Record<string, string> {
-  const user = getAuthUser();
-  const student = getCurrentStudent();
-  const id = (user?.role === 'student' ? user.id : student.id) || '';
+  const id = getCanonicalStudentId();
   return {
     ...authHeaders(),
     ...(id ? { 'X-Student-Id': id } : {}),
@@ -13,8 +11,7 @@ export function studentAuthHeaders(): Record<string, string> {
 }
 
 export function teacherAuthHeaders(): Record<string, string> {
-  const user = getAuthUser();
-  const teacherId = user?.role === 'teacher' ? user.id : (localStorage.getItem('ielts-current-teacher-id') || '');
+  const teacherId = getCanonicalTeacherId();
   return {
     ...authHeaders(),
     ...(teacherId ? { 'X-Teacher-Id': teacherId } : {}),

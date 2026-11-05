@@ -1,5 +1,6 @@
 /** After JWT login, pull org rows into the existing local UI stores. */
 import { orgFetch, type AuthUser } from '@/lib/auth-api';
+import { replaceBranchesFromApi } from '@/lib/mock-api';
 
 function writeEntities(kind: string, rows: Record<string, string>[]) {
   localStorage.setItem(`ielts-entities-${kind}`, JSON.stringify(rows));
@@ -42,8 +43,8 @@ export async function hydrateOrgFromBackend(user: AuthUser) {
       writeEntities('teacher', teachers);
       writeEntities('student', students);
 
-      const branches = await orgFetch<{ branches: any[] }>('/org/branches');
-      localStorage.setItem('ielts-branches-v1', JSON.stringify(branches.branches || []));
+      const branches = await orgFetch<{ branches: Record<string, unknown>[] }>('/org/branches');
+      replaceBranchesFromApi(branches.branches || []);
 
       const batches = await orgFetch<{ batches: any[] }>('/org/batches');
       writeEntities(

@@ -161,7 +161,7 @@ export default function PracticeTestGallery({
                   )}
                   {!assign && (
                     <div className="mt-4">
-                      <ProgressBar value={hasScore ? Math.min(100, ((result.band || 0) / 9) * 100) : 0} />
+                      <ProgressBar value={hasScore && result.band != null ? Math.min(100, (Number(result.band) / 9) * 100) : 0} />
                       <p className={`mt-2 text-xs ${hasScore ? 'font-semibold text-emerald-700' : 'text-muted-foreground'}`}>{result.label}</p>
                     </div>
                   )}

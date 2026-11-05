@@ -1,14 +1,16 @@
 /**
- * TEMPORARY local demo mode (no real JWT required).
- * Active only in Vite `npm run dev`. Production builds stay secure.
- * Force on: VITE_DEMO_MODE=true | Force off: VITE_DEMO_MODE=false
+ * Developer sandbox only — never the staging/production source of truth.
+ *
+ * Opt-in ONLY via VITE_DEMO_MODE=true.
+ * Default (unset / false / staging builds): API + PostgreSQL only.
+ * Do NOT auto-enable in Vite DEV — that caused localStorage dual-SoT.
  */
 export const DEMO_MODE = (() => {
   const flag = (import.meta.env.VITE_DEMO_MODE as string | undefined)?.trim().toLowerCase();
-  if (flag === 'true') return true;
-  if (flag === 'false') return false;
-  return Boolean(import.meta.env.DEV);
+  return flag === 'true';
 })();
+
+export const DEMO_BANNER_TEXT = 'DEMO DATA - NOT PERSISTED | local sandbox only';
 
 const DEMO_TOKEN = 'demo-local-token';
 /** Bump when seed shape changes so local browsers reseed. */
@@ -17,6 +19,26 @@ const DEMO_BATCH_A = 'Morning Batch A';
 const DEMO_BATCH_B = 'Morning Batch B';
 const DEMO_BATCH_EVE = 'Evening Batch A';
 const DEMO_HQ = 'demo-gujranwala';
+
+/** When demo is off, drop any leftover demo-local-token session so staging uses real JWT only. */
+export function purgeDemoSessionIfDisabled() {
+  if (DEMO_MODE || typeof window === 'undefined') return;
+  try {
+    const token = localStorage.getItem('ielts-access-token') || '';
+    if (token === DEMO_TOKEN) {
+      localStorage.removeItem('ielts-access-token');
+      localStorage.removeItem('ielts-auth-user');
+      localStorage.removeItem('ielts-role');
+      localStorage.removeItem('ielts-current-teacher-id');
+      localStorage.removeItem('ielts-current-student');
+      localStorage.removeItem('writing_student_id');
+      localStorage.removeItem('ielts-branch-admin-id');
+      localStorage.removeItem('ielts-branch-admin-username');
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 function randInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;

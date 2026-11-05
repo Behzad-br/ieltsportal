@@ -1,5 +1,5 @@
 """High-value authz / IDOR / production-gate tests."""
-from app.auth.models import User
+from app.auth.models import Branch, User
 from app.auth.security import create_access_token, hash_password
 from app.config import settings
 from app.speaking.services import speaking_session
@@ -27,6 +27,7 @@ def test_speaking_requires_auth_when_legacy_off(client, monkeypatch):
 
 def test_speaking_history_idor(client, db, monkeypatch):
     monkeypatch.setattr(settings, "AUTH_LEGACY_HEADERS", False)
+    db.add(Branch(id="sec-campus", name="Sec Campus", city="Sec", is_active=True))
     a = User(
         id="stu-a",
         role="student",
@@ -34,6 +35,7 @@ def test_speaking_history_idor(client, db, monkeypatch):
         username="stu_a",
         password_hash=hash_password("Secret123!"),
         full_name="A",
+        branch_id="sec-campus",
         is_active=True,
     )
     b = User(
@@ -43,6 +45,7 @@ def test_speaking_history_idor(client, db, monkeypatch):
         username="stu_b",
         password_hash=hash_password("Secret123!"),
         full_name="B",
+        branch_id="sec-campus",
         is_active=True,
     )
     db.add_all([a, b])

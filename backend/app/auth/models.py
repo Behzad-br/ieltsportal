@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, String, Text
+from sqlalchemy import Boolean, Column, DateTime, String, Text, UniqueConstraint
 
 from app.database import Base
 
@@ -19,11 +19,16 @@ class Branch(Base):
     name = Column(String, nullable=False)
     city = Column(String, default="")
     image_url = Column(Text, default="")
+    is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Batch(Base):
     __tablename__ = "auth_batches"
+    __table_args__ = (
+        UniqueConstraint("branch_id", "name", name="uq_auth_batches_branch_name"),
+    )
 
     id = Column(String, primary_key=True, default=_id)
     name = Column(String, nullable=False, index=True)

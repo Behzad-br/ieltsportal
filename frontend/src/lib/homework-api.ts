@@ -1,38 +1,41 @@
-import { authHeaders, getAuthUser } from "@/lib/auth-api";
+import { authHeaders, clearAuthSession, getAuthUser } from "@/lib/auth-api";
 import { apiBase } from "@/lib/api-base";
-import { getCurrentStudent } from "@/lib/mock-api";
+import { messageFromErrorBody, parseJsonBody } from "@/lib/api-errors";
+import { getCanonicalStudentId } from "@/lib/identity";
 
 async function hw<T>(path: string, options?: RequestInit): Promise<T> {
   const user = getAuthUser();
-  const student = getCurrentStudent();
+  // Students use canonical JWT id. Staff teacher endpoints omit X-Student-Id.
   const studentId =
     user?.role === "student"
-      ? user.id
+      ? getCanonicalStudentId()
       : user?.role === "teacher" || user?.role === "branch_admin" || user?.role === "super_admin"
         ? ""
-        : student?.id || "";
+        : getCanonicalStudentId();
 
-  const res = await fetch(`${apiBase()}${path}`, {
-    ...options,
-    headers: {
-      ...authHeaders(),
-      ...(studentId ? { "X-Student-Id": studentId } : {}),
-      ...(options?.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
-      ...(options?.headers as Record<string, string> | undefined),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}${path}`, {
+      ...options,
+      headers: {
+        ...authHeaders(),
+        ...(studentId ? { "X-Student-Id": studentId } : {}),
+        ...(options?.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
+        ...(options?.headers as Record<string, string> | undefined),
+      },
+    });
+  } catch {
+    throw new Error("Cannot connect to server. Make sure the backend is running.");
+  }
+  if (res.status === 401) {
+    clearAuthSession();
+  }
   if (!res.ok) {
-    let detail: unknown = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const body = await parseJsonBody(res);
+    throw new Error(messageFromErrorBody(body, res.status));
   }
   if (res.status === 204) return {} as T;
-  return res.json();
+  return (await parseJsonBody(res)) as T;
 }
 
 export type HomeworkItem = {

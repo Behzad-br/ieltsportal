@@ -9,6 +9,7 @@ Local (matches frontend Vite proxy):
     uvicorn app.main:asgi_app --reload --host 127.0.0.1 --port 5000
 """
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,10 +18,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.config import settings
-from app.speaking.controllers import answers, health, history, tests
+from app.analytics import controllers as analytics
+from app.speaking.controllers import answers, health, history, speaking_admin, tests
 from app.writing.controllers import writing, writing_admin
 from app.reading.controllers import reading
 from app.listening.controllers import listening
@@ -29,6 +32,12 @@ from app.notes import controllers as notes
 from app.mocks import controllers as mocks
 from app.auth import controllers as auth
 from app.database import init_db
+from app.db_security import (
+    assert_no_auto_create_in_managed,
+    assert_postgres_tls_policy,
+    public_exception_detail,
+    redact_secrets,
+)
 from app.security_hardening import SecurityHeadersMiddleware
 
 logging.basicConfig(
@@ -39,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 
 def _assert_production_security() -> None:
+    # Managed schema envs: never allow silent create_all, always require TLS for Postgres.
+    if settings.is_managed_schema_env:
+        assert_no_auto_create_in_managed(settings.environment_name, settings.auto_create_schema)
+        assert_postgres_tls_policy(settings.DATABASE_URL, environment=settings.environment_name)
     if not settings.is_production:
         return
     if (settings.JWT_SECRET or "").startswith("change-me"):
@@ -101,15 +114,19 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not pre-load practice banks: %s", exc)
 
     # Load Whisper in the background so the API is usable immediately.
-    def _load_whisper():
-        try:
-            from app.speaking.services.transcription import get_whisper_model
-            get_whisper_model()
-        except Exception as exc:
-            logger.warning("Could not pre-load Whisper model: %s", exc)
+    # Skip under pytest — native Whisper + TestClient races cause access violations on Windows.
+    import sys
 
-    import threading
-    threading.Thread(target=_load_whisper, daemon=True).start()
+    if "pytest" not in sys.modules:
+        def _load_whisper():
+            try:
+                from app.speaking.services.transcription import get_whisper_model
+                get_whisper_model()
+            except Exception as exc:
+                logger.warning("Could not pre-load Whisper model: %s", exc)
+
+        import threading
+        threading.Thread(target=_load_whisper, daemon=True).start()
 
     yield
 
@@ -149,27 +166,78 @@ app.add_middleware(
 )
 
 
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Attach a safe correlation id for logs + X-Request-ID (never a secret)."""
+
+    async def dispatch(self, request: Request, call_next):
+        incoming = (request.headers.get("x-request-id") or "").strip()
+        # Accept only short safe tokens — reject header injection / oversized values.
+        safe = bool(incoming) and len(incoming) <= 64 and all(
+            c.isalnum() or c in "-_" for c in incoming
+        )
+        request_id = incoming if safe else str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+app.add_middleware(RequestIdMiddleware)
+
+
+def _safe_http_detail(detail):
+    """Preserve structured FastAPI details; redact secret-like strings only."""
+    if isinstance(detail, str):
+        return redact_secrets(detail)
+    if isinstance(detail, list):
+        return [_safe_http_detail(item) for item in detail]
+    if isinstance(detail, dict):
+        return {k: _safe_http_detail(v) for k, v in detail.items()}
+    return detail
+
+
 # ─────────────────────────── Exception handlers ───────────────────────────────
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """Keep real HTTP error details (404/400/500 from routes) instead of hiding them."""
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    """Keep real HTTP statuses/details; redact secrets without collapsing to generic 500."""
+    request_id = getattr(request.state, "request_id", None)
+    headers = {"X-Request-ID": request_id} if request_id else None
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": _safe_http_detail(exc.detail)},
+        headers=headers,
+    )
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    request_id = getattr(request.state, "request_id", None)
+    headers = {"X-Request-ID": request_id} if request_id else None
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+        headers=headers,
+    )
 
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
-    """Catch-all: log fully; never send stack traces (or exception text in production)."""
-    logger.error("Unhandled exception on %s: %s", request.url.path, exc, exc_info=True)
-    detail = "An internal error occurred."
-    if not settings.is_production:
-        detail = f"An internal error occurred: {exc}"
-    return JSONResponse(status_code=500, content={"detail": detail})
+    """Catch-all: log redacted; never send stack traces or secrets to clients."""
+    request_id = getattr(request.state, "request_id", None)
+    logger.error(
+        "Unhandled exception on %s [req=%s]: %s",
+        request.url.path,
+        request_id or "-",
+        redact_secrets(str(exc)),
+        exc_info=True,
+    )
+    headers = {"X-Request-ID": request_id} if request_id else None
+    return JSONResponse(
+        status_code=500,
+        content={"detail": public_exception_detail(exc, is_production=settings.is_production)},
+        headers=headers,
+    )
 
 
 # ─────────────────────────── Routers ─────────────────────────────────────────
@@ -179,6 +247,7 @@ app.include_router(auth.org_router, prefix="/api", tags=["org"])
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(tests.router, prefix="/api", tags=["tests"])
 app.include_router(answers.router, prefix="/api", tags=["answers"])
+app.include_router(speaking_admin.router, prefix="/api", tags=["speaking-admin"])
 app.include_router(history.router, prefix="/api", tags=["history"])
 app.include_router(writing.router, prefix="/api", tags=["writing"])
 app.include_router(writing_admin.router, prefix="/api", tags=["writing-admin"])
@@ -187,6 +256,7 @@ app.include_router(listening.router, prefix="/api", tags=["listening"])
 app.include_router(homework.router, prefix="/api", tags=["homework"])
 app.include_router(notes.router, prefix="/api", tags=["notes"])
 app.include_router(mocks.router, prefix="/api", tags=["mocks"])
+app.include_router(analytics.router, prefix="/api", tags=["analytics"])
 
 
 @app.get("/")

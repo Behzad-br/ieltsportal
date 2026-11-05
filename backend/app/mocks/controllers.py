@@ -14,8 +14,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.auth.access import users_in_branch
+from app.auth.deps import get_current_user, get_optional_user
 from app.auth.deps import resolve_student_keys as get_student_keys
 from app.auth.deps import resolve_teacher_id as get_teacher_id
+from app.auth.models import User
 from app.config import settings
 from app.database import get_db
 from app.homework.controllers import _open_skill, require_teacher
@@ -29,6 +32,7 @@ from app.mocks.models import (
     MockLibraryItem,
     TeacherMockAction,
 )
+from app.ielts_bands import compute_overall_band, parse_ielts_band, single_skill_result_label
 from app.mocks.seed import ensure_library
 
 logger = logging.getLogger(__name__)
@@ -181,7 +185,34 @@ def _find_slot(db: Session, assignment_id: str, keys: list[str]) -> Optional[Moc
 
 
 def _owned(row: MockAssignment, teacher_id: str) -> bool:
-    return (row.created_by or "teacher") == (teacher_id or "teacher")
+    """Strict creator match. Legacy empty/teacher only matches legacy teacher key."""
+    created = (row.created_by or "").strip()
+    tid = (teacher_id or "").strip()
+    if not tid:
+        return False
+    if created == tid:
+        return True
+    if created in {"", "teacher"} and tid == "teacher" and settings.AUTH_LEGACY_HEADERS:
+        return True
+    return False
+
+
+def _assignment_visible_to_staff(db: Session, row: MockAssignment, actor: User | None, teacher_id: str) -> bool:
+    if actor and actor.role == "super_admin":
+        return True
+    if _owned(row, teacher_id):
+        return True
+    if actor and actor.role == "branch_admin":
+        campus = (actor.branch_id or "").strip()
+        if not campus:
+            return False
+        creator = db.query(User).filter_by(id=row.created_by).first() if row.created_by else None
+        if creator and (creator.branch_id or "").strip() == campus:
+            return True
+        slots = db.query(MockAssignmentStudent).filter_by(assignment_id=row.id).all()
+        allowed = set(users_in_branch(db, campus, role="student"))
+        return any(s.student_id in allowed for s in slots)
+    return False
 
 
 def _attempt_remaining(attempt: MockAttempt, slot: MockAssignmentStudent, row: MockAssignment, now: Optional[datetime] = None) -> int:
@@ -252,8 +283,66 @@ def _module_for(mock_type: str) -> str:
     if mock_type in ("reading", "listening", "writing", "speaking"):
         return mock_type
     if mock_type == "full":
-        return "reading"
+        # Full mocks are multi-section; callers must not use this as a single skill opener.
+        return "full"
     return "writing"
+
+
+def _pull_bands_from_linked_skills(db: Session, attempt: MockAttempt) -> dict[str, float | None]:
+    """Read bands only from linked skill attempts owned by the same student."""
+    out: dict[str, float | None] = {
+        "listening_band": attempt.listening_band,
+        "reading_band": attempt.reading_band,
+        "writing_band": attempt.writing_band,
+        "speaking_band": attempt.speaking_band,
+    }
+    skill = attempt.skill_ref or {}
+    sections = skill.get("sections") if skill.get("kind") == "full" else None
+    items = []
+    if sections and isinstance(sections, dict):
+        items.extend(sections.values())
+    else:
+        items.append(skill)
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind") or ""
+        if kind == "reading" and item.get("attemptId"):
+            from app.reading.models import ReadingAttempt
+
+            reading = db.query(ReadingAttempt).filter_by(id=item["attemptId"]).first()
+            if reading and reading.student_id == attempt.student_id and reading.estimated_band is not None:
+                out["reading_band"] = float(reading.estimated_band)
+        elif kind == "listening" and item.get("attemptId"):
+            from app.listening.models import ListeningAttempt
+
+            listening = db.query(ListeningAttempt).filter_by(id=item["attemptId"]).first()
+            if listening and listening.student_id == attempt.student_id and listening.estimated_band is not None:
+                out["listening_band"] = float(listening.estimated_band)
+        elif kind == "writing-question" and item.get("ref"):
+            from app.writing.models import WritingAttempt
+
+            writing = db.query(WritingAttempt).filter_by(id=item["ref"]).first()
+            if writing and writing.student_id == attempt.student_id:
+                band = writing.final_band if writing.final_band is not None else writing.estimated_band
+                if band is not None:
+                    out["writing_band"] = float(band)
+        elif kind == "writing-mock" and item.get("mockId"):
+            from app.writing.models import WritingMockSession
+
+            mock = db.query(WritingMockSession).filter_by(id=item["mockId"]).first()
+            if mock and mock.student_id == attempt.student_id and getattr(mock, "overall_band", None) is not None:
+                out["writing_band"] = float(mock.overall_band)
+        elif kind == "speaking" and item.get("sessionId"):
+            from app.speaking.models import TestSession
+
+            sess = db.query(TestSession).filter_by(id=item["sessionId"]).first()
+            if sess and sess.student_id == attempt.student_id:
+                band = getattr(sess, "estimated_band", None)
+                if band is not None:
+                    out["speaking_band"] = float(band)
+    return out
 
 
 @router.get("/mocks/flag")
@@ -275,12 +364,19 @@ async def create_assignment(
     db: Session = Depends(get_db),
     teacher_id: str = Depends(get_teacher_id),
     _: str = Depends(require_teacher),
+    actor: User | None = Depends(get_optional_user),
 ):
     _enabled()
     ensure_library(db)
     students = body.get("students") or []
     if not isinstance(students, list) or not students:
         raise HTTPException(400, "Select at least one enrolled student.")
+    if actor and actor.role in {"teacher", "branch_admin"}:
+        allowed = set(users_in_branch(db, actor.branch_id or "", role="student"))
+        for item in students:
+            sid = str((item or {}).get("id") or "").strip()
+            if sid and sid not in allowed:
+                raise HTTPException(403, "Cannot assign students outside your branch.")
     library = None
     if body.get("library_item_id"):
         library = db.query(MockLibraryItem).filter_by(id=body["library_item_id"]).first()
@@ -289,6 +385,11 @@ async def create_assignment(
     title = (body.get("title") or (library.title if library else "IELTS Mock")).strip()
     if not title:
         raise HTTPException(400, "Mock name is required.")
+    # Product assigns one skill per mock. Library "full" items must be remapped to a real skill.
+    if mock_type == "full":
+        mock_type = "writing"
+    if mock_type not in {"reading", "listening", "writing", "speaking"}:
+        raise HTTPException(400, "mock_type must be reading, listening, writing, or speaking.")
     duration = int(body.get("duration_minutes") or (library.duration_minutes if library else 60) or 60)
     paper_source = (body.get("paper_source") or ("manual" if body.get("manual") else "bank")).strip().lower()
     if paper_source not in {"bank", "manual"}:
@@ -314,23 +415,41 @@ async def create_assignment(
             raise HTTPException(400, "Add listening questions for this manual mock.")
         if mock_type == "speaking" and not refs.get("prompt") and not refs.get("speaking_test_id") and not refs.get("test_id"):
             raise HTTPException(400, "Add a speaking prompt for this manual mock.")
-        if mock_type == "full":
-            raise HTTPException(400, "Manual create supports one skill at a time. Pick Reading, Listening, Writing or Speaking.")
     elif paper_source == "bank" and not library and not refs:
         # Keep older assign payloads working: attach first available bank papers for the skill.
         from app.mocks.seed import _paper_refs_for
 
-        refs = _paper_refs_for(mock_type if mock_type != "full" else "reading", ielts_type, db)
+        refs = _paper_refs_for(mock_type, ielts_type, db)
         if not refs and mock_type not in {"custom"}:
             raise HTTPException(400, "Pick a paper from the mock library or create a manual mock.")
+    batch_id = (body.get("batch_id") or "").strip() or None
+    batch_label = (body.get("batch_label") or "").strip() or None
+    if actor and actor.role in {"teacher", "branch_admin"} and (batch_id or batch_label):
+        from app.auth.access import find_batch_on_branch
+        from app.auth.models import Batch
+
+        campus = (actor.branch_id or "").strip()
+        matched = None
+        if batch_id:
+            matched = db.query(Batch).filter_by(id=batch_id).first()
+            if not matched or (matched.branch_id or "") != campus:
+                raise HTTPException(400, "batch_id is not on your campus.")
+        elif batch_label:
+            matched = find_batch_on_branch(db, campus, batch_label)
+            if matched is None:
+                raise HTTPException(400, "batch_label is not on your campus.")
+        if matched:
+            batch_id = matched.id
+            batch_label = matched.name
+
     row = MockAssignment(
         library_item_id=library.id if library else None,
         title=title,
         mock_type=mock_type,
         ielts_type=ielts_type,
         assign_mode=body.get("assign_mode") or "batch",
-        batch_id=body.get("batch_id"),
-        batch_label=body.get("batch_label"),
+        batch_id=batch_id,
+        batch_label=batch_label,
         available_at=_parse_dt(body.get("available_at")),
         deadline_at=_parse_dt(body.get("deadline_at")),
         duration_minutes=max(1, duration),
@@ -383,16 +502,14 @@ async def list_assignments(
     db: Session = Depends(get_db),
     teacher_id: str = Depends(get_teacher_id),
     _: str = Depends(require_teacher),
+    actor: User | None = Depends(get_optional_user),
 ):
     _enabled()
-    rows = (
-        db.query(MockAssignment)
-        .filter(MockAssignment.created_by == teacher_id)
-        .order_by(MockAssignment.created_at.desc())
-        .all()
-    )
+    rows = db.query(MockAssignment).order_by(MockAssignment.created_at.desc()).all()
     out = []
     for row in rows:
+        if not _assignment_visible_to_staff(db, row, actor, teacher_id):
+            continue
         slots = db.query(MockAssignmentStudent).filter_by(assignment_id=row.id).all()
         attempts = db.query(MockAttempt).filter_by(assignment_id=row.id).all()
         submitted = len([a for a in attempts if a.status in ("submitted", "reviewed") or a.published])
@@ -406,10 +523,11 @@ async def assignment_students(
     db: Session = Depends(get_db),
     teacher_id: str = Depends(get_teacher_id),
     _: str = Depends(require_teacher),
+    actor: User | None = Depends(get_optional_user),
 ):
     _enabled()
     row = db.query(MockAssignment).filter_by(id=assignment_id).first()
-    if not row or not _owned(row, teacher_id):
+    if not row or not _assignment_visible_to_staff(db, row, actor, teacher_id):
         raise HTTPException(404, "Assignment not found.")
     slots = db.query(MockAssignmentStudent).filter_by(assignment_id=assignment_id).all()
     attempts = {a.student_id: a for a in db.query(MockAttempt).filter_by(assignment_id=assignment_id).all()}
@@ -559,6 +677,18 @@ async def student_inbox(db: Session = Depends(get_db), keys: list[str] = Depends
                 "writing_band": attempt.writing_band if attempt and attempt.published else None,
                 "speaking_band": attempt.speaking_band if attempt and attempt.published else None,
                 "overall_band": attempt.overall_band if attempt and attempt.published else None,
+                # Single-skill product: do not imply four-skill IELTS overall.
+                "result_label": single_skill_result_label(row.mock_type),
+                "skill_band": (
+                    {
+                        "listening": attempt.listening_band,
+                        "reading": attempt.reading_band,
+                        "writing": attempt.writing_band,
+                        "speaking": attempt.speaking_band,
+                    }.get((row.mock_type or "").lower())
+                    if attempt and attempt.published
+                    else None
+                ),
                 "writing_feedback": attempt.writing_feedback if attempt and attempt.published else None,
             }
         )
@@ -598,6 +728,17 @@ async def student_detail(assignment_id: str, db: Session = Depends(get_db), keys
         "writing_band": attempt.writing_band if attempt and published else None,
         "speaking_band": attempt.speaking_band if attempt and published else None,
         "overall_band": attempt.overall_band if attempt and published else None,
+        "result_label": single_skill_result_label(row.mock_type),
+        "skill_band": (
+            {
+                "listening": attempt.listening_band,
+                "reading": attempt.reading_band,
+                "writing": attempt.writing_band,
+                "speaking": attempt.speaking_band,
+            }.get((row.mock_type or "").lower())
+            if attempt and published
+            else None
+        ),
         "writing_feedback": attempt.writing_feedback if attempt and published else None,
     }
 
@@ -631,7 +772,10 @@ async def start_attempt(body: dict, db: Session = Depends(get_db), keys: list[st
     if existing >= (row.attempts_allowed or 1) and not (latest and latest.status == "in_progress"):
         raise HTTPException(400, "No attempts remaining.")
     duration = slot.duration_minutes or row.duration_minutes
+    # Legacy "full" rows: treat as writing (product is one skill per assignment).
     module = _module_for(row.mock_type)
+    if module == "full":
+        module = "writing"
     payload = dict(row.paper_refs or {})
     payload["test_type"] = row.ielts_type
     paper_source = (getattr(row, "paper_source", None) or "bank").strip().lower()
@@ -666,12 +810,14 @@ async def start_attempt(body: dict, db: Session = Depends(get_db), keys: list[st
             if not payload.get("test_id"):
                 raise HTTPException(400, "No listening paper is linked to this mock yet.")
         if module == "writing":
-            if not payload.get("task1_id") and not payload.get("task2_id") and not payload.get("question_id"):
+            if not payload.get("task1_id") and not payload.get("task2_id") and not payload.get("question_id") and not payload.get("prompt"):
                 raise HTTPException(400, "No writing paper is linked to this mock yet.")
         if module == "speaking":
             payload["test_id"] = payload.get("speaking_test_id") or payload.get("test_id")
-            if not payload.get("test_id"):
+            if not payload.get("test_id") and not payload.get("prompt") and not payload.get("speaking_test"):
                 raise HTTPException(400, "No speaking paper is linked to this mock yet.")
+    # Authenticated student owns the linked skill attempt — never body student_id.
+    student_id = slot.student_id
     homework_row = SimpleNamespace(
         id=row.id,
         payload=payload,
@@ -683,16 +829,21 @@ async def start_attempt(body: dict, db: Session = Depends(get_db), keys: list[st
         title=row.title,
     )
     try:
-        session = await _open_skill(db, homework_row, slot.student_id)
+        session = await _open_skill(db, homework_row, student_id)
     except HTTPException:
         raise
     except Exception as exc:
+        from app.ai_safety import public_ai_error
+
         logger.exception("Could not open mock paper")
-        raise HTTPException(400, f"Could not open the paper for this mock: {exc}") from exc
+        raise HTTPException(
+            400,
+            public_ai_error(exc, fallback="Could not open the paper for this mock."),
+        ) from exc
     attempt = MockAttempt(
         assignment_student_id=slot.id,
         assignment_id=row.id,
-        student_id=slot.student_id,
+        student_id=student_id,
         status="in_progress",
         current_section=module,
         current_question=1,
@@ -835,47 +986,47 @@ async def submit_attempt(attempt_id: str, body: dict, db: Session = Depends(get_
     attempt = db.query(MockAttempt).filter_by(id=attempt_id).first()
     if not attempt or attempt.student_id not in keys:
         raise HTTPException(404, "Attempt not found.")
+    assignment = db.query(MockAssignment).filter_by(id=attempt.assignment_id).first()
+    result_mode = (getattr(assignment, "result_mode", None) or "teacher") if assignment else "teacher"
+    # Idempotent: already finalised — bands only when published to the student.
+    if attempt.status in ("submitted", "reviewed") or attempt.published:
+        published = bool(attempt.published)
+        return {
+            "id": attempt.id,
+            "status": attempt.status,
+            "published": published,
+            "overall_band": attempt.overall_band if published else None,
+            "result_mode": result_mode,
+            "result_pending": not published,
+        }
+    # Never trust client-supplied bands.
+    bands = _pull_bands_from_linked_skills(db, attempt)
+    attempt.listening_band = bands["listening_band"]
+    attempt.reading_band = bands["reading_band"]
+    attempt.writing_band = bands["writing_band"]
+    attempt.speaking_band = bands["speaking_band"]
+    skill = attempt.skill_ref or {}
+    if skill.get("kind") == "writing-question" and skill.get("ref"):
+        from app.writing.models import WritingAttempt
+
+        writing = db.query(WritingAttempt).filter_by(id=skill["ref"]).first()
+        if writing and writing.student_id == attempt.student_id:
+            grading = writing.grading if isinstance(writing.grading, dict) else None
+            if grading and grading.get("estimated_band_explanation") and not attempt.writing_feedback:
+                attempt.writing_feedback = grading.get("estimated_band_explanation")
+
     attempt.status = "submitted"
     attempt.submitted_at = datetime.utcnow()
     attempt.last_seen_at = attempt.submitted_at
     slot = db.query(MockAssignmentStudent).filter_by(id=attempt.assignment_student_id).first()
     if slot:
         slot.status = "submitted"
-    assignment = db.query(MockAssignment).filter_by(id=attempt.assignment_id).first()
-    skill = attempt.skill_ref
-    if skill.get("kind") == "reading" and skill.get("attemptId"):
-        from app.reading.models import ReadingAttempt
-
-        reading = db.query(ReadingAttempt).filter_by(id=skill["attemptId"]).first()
-        if reading and reading.estimated_band is not None:
-            attempt.reading_band = reading.estimated_band
-    if skill.get("kind") == "listening" and skill.get("attemptId"):
-        from app.listening.models import ListeningAttempt
-
-        listening = db.query(ListeningAttempt).filter_by(id=skill["attemptId"]).first()
-        if listening and listening.estimated_band is not None:
-            attempt.listening_band = listening.estimated_band
-    if skill.get("kind") in ("writing-question", "writing-mock"):
-        from app.writing.models import WritingAttempt, WritingMockSession
-
-        if skill.get("kind") == "writing-question" and skill.get("ref"):
-            writing = db.query(WritingAttempt).filter_by(id=skill["ref"]).first()
-            if writing and writing.estimated_band is not None:
-                attempt.writing_band = writing.estimated_band
-                grading = writing.grading if isinstance(writing.grading, dict) else None
-                if grading and grading.get("estimated_band_explanation"):
-                    attempt.writing_feedback = grading.get("estimated_band_explanation")
-        if skill.get("kind") == "writing-mock" and skill.get("mockId"):
-            mock = db.query(WritingMockSession).filter_by(id=skill["mockId"]).first()
-            if mock and getattr(mock, "overall_band", None) is not None:
-                attempt.writing_band = mock.overall_band
     db.add(MockIntegrityEvent(attempt_id=attempt.id, student_id=attempt.student_id, event_type="TEST_SUBMITTED"))
-    result_mode = (getattr(assignment, "result_mode", None) or "teacher") if assignment else "teacher"
+    attempt.overall_band = compute_overall_band(
+        attempt.listening_band, attempt.reading_band, attempt.writing_band, attempt.speaking_band
+    )
     if result_mode == "ai":
-        bands = [b for b in (attempt.listening_band, attempt.reading_band, attempt.writing_band, attempt.speaking_band) if b is not None]
-        if bands:
-            attempt.overall_band = round((sum(bands) / len(bands)) * 2) / 2
-        if not attempt.writing_feedback and skill.get("kind", "").startswith("writing"):
+        if not attempt.writing_feedback and (skill.get("kind") or "").startswith("writing"):
             attempt.writing_feedback = "AI estimated band published automatically. Your teacher can still override it later."
         attempt.published = True
         attempt.status = "reviewed"
@@ -889,12 +1040,14 @@ async def submit_attempt(attempt_id: str, body: dict, db: Session = Depends(get_
             f"/student/mocks/{attempt.assignment_id}",
         )
     db.commit()
+    published = bool(attempt.published)
     return {
         "id": attempt.id,
         "status": attempt.status,
-        "published": bool(attempt.published),
-        "overall_band": attempt.overall_band,
+        "published": published,
+        "overall_band": attempt.overall_band if published else None,
         "result_mode": result_mode,
+        "result_pending": not published,
     }
 
 
@@ -904,11 +1057,14 @@ async def monitor(
     db: Session = Depends(get_db),
     teacher_id: str = Depends(get_teacher_id),
     _: str = Depends(require_teacher),
+    actor: User | None = Depends(get_optional_user),
 ):
     _enabled()
     from app.mocks.livekit_tokens import livekit_configured
 
-    data = await assignment_students(assignment_id, db=db, teacher_id=teacher_id, _="teacher")
+    data = await assignment_students(
+        assignment_id, db=db, teacher_id=teacher_id, _="teacher", actor=actor
+    )
     students = data["students"]
     configured = livekit_configured()
     return {
@@ -933,17 +1089,24 @@ async def review_attempt(
     db: Session = Depends(get_db),
     teacher_id: str = Depends(get_teacher_id),
     _: str = Depends(require_teacher),
+    actor: User | None = Depends(get_optional_user),
 ):
     _enabled()
     attempt = db.query(MockAttempt).filter_by(id=attempt_id).first()
     if not attempt:
         raise HTTPException(404, "Attempt not found.")
     assignment = db.query(MockAssignment).filter_by(id=attempt.assignment_id).first()
-    if assignment and not _owned(assignment, teacher_id):
+    if not assignment or not _assignment_visible_to_staff(db, assignment, actor, teacher_id):
         raise HTTPException(404, "Attempt not found.")
+    # Seed from linked skill DB bands, then apply teacher overrides.
+    linked = _pull_bands_from_linked_skills(db, attempt)
+    attempt.listening_band = linked["listening_band"]
+    attempt.reading_band = linked["reading_band"]
+    attempt.writing_band = linked["writing_band"]
+    attempt.speaking_band = linked["speaking_band"]
     for field in ("listening_band", "reading_band", "writing_band", "speaking_band"):
         if field in body and body[field] is not None:
-            setattr(attempt, field, float(body[field]))
+            setattr(attempt, field, parse_ielts_band(body[field], field=field))
     if "writing_feedback" in body or any(k in body for k in ("task_achievement", "coherence", "lexical", "grammar")):
         parts = []
         if body.get("task_achievement") is not None:
@@ -957,13 +1120,15 @@ async def review_attempt(
         if body.get("writing_feedback"):
             parts.append(str(body.get("writing_feedback")))
         attempt.writing_feedback = "\n".join(parts) if parts else body.get("writing_feedback")
-    bands = [b for b in (attempt.listening_band, attempt.reading_band, attempt.writing_band, attempt.speaking_band) if b is not None]
-    if bands:
-        raw = sum(bands) / len(bands)
-        attempt.overall_band = round(raw * 2) / 2
+    attempt.overall_band = compute_overall_band(
+        attempt.listening_band, attempt.reading_band, attempt.writing_band, attempt.speaking_band
+    )
     if body.get("publish"):
         attempt.published = True
         attempt.status = "reviewed"
+        slot = db.query(MockAssignmentStudent).filter_by(id=attempt.assignment_student_id).first()
+        if slot:
+            slot.status = "reviewed"
         _notify(db, attempt.student_id, "Mock result published", "Your teacher published a mock result.", f"/student/mocks/{attempt.assignment_id}")
     _log_action(db, teacher_id, "review", assignment_id=attempt.assignment_id, attempt_id=attempt.id, payload=body)
     db.commit()
@@ -975,9 +1140,80 @@ async def review_attempt(
     }
 
 
-@router.get("/mocks/attempts/{attempt_id}/events")
-async def attempt_events(attempt_id: str, db: Session = Depends(get_db), _: str = Depends(require_teacher)):
+@router.get("/mocks/attempts/{attempt_id}")
+async def get_attempt_work(
+    attempt_id: str,
+    db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_teacher_id),
+    _: str = Depends(require_teacher),
+    actor: User | None = Depends(get_optional_user),
+):
+    """Teacher view of a mock attempt (answers + bands). Hidden cross-campus → 404."""
     _enabled()
+    attempt = db.query(MockAttempt).filter_by(id=attempt_id).first()
+    if not attempt:
+        raise HTTPException(404, "Attempt not found.")
+    assignment = db.query(MockAssignment).filter_by(id=attempt.assignment_id).first()
+    if not assignment or not _assignment_visible_to_staff(db, assignment, actor, teacher_id):
+        raise HTTPException(404, "Attempt not found.")
+    slot = db.query(MockAssignmentStudent).filter_by(id=attempt.assignment_student_id).first()
+    student = db.query(User).filter_by(id=attempt.student_id).first()
+    student_name = (
+        (slot.student_name if slot and slot.student_name else None)
+        or (student.full_name if student else None)
+        or attempt.student_id
+    )
+    answer_rows = (
+        db.query(MockAnswer)
+        .filter_by(attempt_id=attempt.id)
+        .order_by(MockAnswer.saved_at.asc())
+        .all()
+    )
+    answers = []
+    for row in answer_rows:
+        value = None
+        if row.value_json:
+            try:
+                value = json.loads(row.value_json)
+            except (TypeError, json.JSONDecodeError):
+                value = row.value_json
+        answers.append({"question_key": row.question_key, "value": value})
+    linked = _pull_bands_from_linked_skills(db, attempt)
+    return {
+        "attempt_id": attempt.id,
+        "assignment_id": attempt.assignment_id,
+        "student_id": attempt.student_id,
+        "student_name": student_name,
+        "status": attempt.status,
+        "submitted_at": _iso(attempt.submitted_at),
+        "answers": answers,
+        "writing_band": linked["writing_band"] if linked["writing_band"] is not None else attempt.writing_band,
+        "listening_band": linked["listening_band"] if linked["listening_band"] is not None else attempt.listening_band,
+        "reading_band": linked["reading_band"] if linked["reading_band"] is not None else attempt.reading_band,
+        "speaking_band": linked["speaking_band"] if linked["speaking_band"] is not None else attempt.speaking_band,
+        "overall_band": attempt.overall_band,
+        "writing_feedback": attempt.writing_feedback,
+        "published": bool(attempt.published),
+        "result_pending": not bool(attempt.published),
+        "skill": attempt.skill_ref,
+    }
+
+
+@router.get("/mocks/attempts/{attempt_id}/events")
+async def attempt_events(
+    attempt_id: str,
+    db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_teacher_id),
+    _: str = Depends(require_teacher),
+    actor: User | None = Depends(get_optional_user),
+):
+    _enabled()
+    attempt = db.query(MockAttempt).filter_by(id=attempt_id).first()
+    if not attempt:
+        raise HTTPException(404, "Attempt not found.")
+    assignment = db.query(MockAssignment).filter_by(id=attempt.assignment_id).first()
+    if not assignment or not _assignment_visible_to_staff(db, assignment, actor, teacher_id):
+        raise HTTPException(404, "Attempt not found.")
     rows = (
         db.query(MockIntegrityEvent)
         .filter_by(attempt_id=attempt_id)
@@ -1030,9 +1266,9 @@ async def read_notification(notification_id: str, db: Session = Depends(get_db),
 async def livekit_token(
     body: dict,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_teacher_id),
-    keys: list[str] = Depends(get_student_keys),
+    user: User = Depends(get_current_user),
 ):
+    """Mint LiveKit token bound to JWT role + assignment ownership/slot — never trust body alone."""
     _enabled()
     from app.mocks.livekit_tokens import (
         create_token,
@@ -1045,24 +1281,45 @@ async def livekit_token(
     if not livekit_configured():
         return {"enabled": False, "url": "", "token": "", "room": "", "identity": ""}
     assignment_id = body.get("assignment_id")
-    role = (body.get("role") or "").strip()
+    requested = (body.get("role") or "").strip().lower()
     row = db.query(MockAssignment).filter_by(id=assignment_id).first()
     if not row:
         raise HTTPException(404, "Assignment not found.")
     room = room_name(row.id)
     try:
-        if role == "teacher":
-            if not _owned(row, teacher_id):
+        if user.role in {"teacher", "branch_admin", "super_admin"}:
+            if requested == "student":
+                raise HTTPException(403, "Staff cannot mint a student LiveKit identity.")
+            if not _assignment_visible_to_staff(db, row, user, user.id):
                 raise HTTPException(404, "Assignment not found.")
-            identity = teacher_identity(teacher_id)
+            # Teachers must own the assignment (creator); BA/SA covered by visibility helper.
+            if user.role == "teacher" and not _owned(row, user.id):
+                raise HTTPException(404, "Assignment not found.")
+            identity = teacher_identity(user.id)
             token = create_token(
                 identity=identity,
-                name=teacher_id,
+                name=user.full_name or user.id,
                 room=room,
                 can_publish=True,
                 can_subscribe=True,
             )
-            return {"enabled": True, "url": settings.LIVEKIT_URL, "token": token, "room": room, "identity": identity}
+            return {
+                "enabled": True,
+                "url": settings.LIVEKIT_URL,
+                "token": token,
+                "room": room,
+                "identity": identity,
+            }
+
+        if user.role != "student":
+            raise HTTPException(403, "Not allowed.")
+        if requested == "teacher":
+            raise HTTPException(403, "Students cannot mint teacher LiveKit tokens.")
+        keys = [user.id]
+        if user.username:
+            keys.append(user.username)
+        if user.email:
+            keys.append(user.email)
         slot = _find_slot(db, row.id, keys)
         if not slot or slot.cancelled:
             raise HTTPException(404, "Mock not found.")
@@ -1074,7 +1331,13 @@ async def livekit_token(
             can_publish=True,
             can_subscribe=True,
         )
-        return {"enabled": True, "url": settings.LIVEKIT_URL, "token": token, "room": room, "identity": identity}
+        return {
+            "enabled": True,
+            "url": settings.LIVEKIT_URL,
+            "token": token,
+            "room": room,
+            "identity": identity,
+        }
     except HTTPException:
         raise
     except Exception as exc:

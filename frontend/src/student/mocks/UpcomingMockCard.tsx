@@ -87,7 +87,8 @@ export default function UpcomingMockCard() {
                   </div>
                   {status === 'results' && (
                     <p className="mt-2 text-sm">
-                      Overall <strong>{item.overall_band ?? '—'}</strong>
+                      {item.result_label || 'Skill band'}{' '}
+                      <strong>{item.skill_band ?? item.overall_band ?? '—'}</strong>
                     </p>
                   )}
                 </div>

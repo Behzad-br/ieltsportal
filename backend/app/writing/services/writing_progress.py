@@ -103,10 +103,18 @@ def collect_progress(db: Session, student_id: str, days: Optional[int] = None) -
         if weak_types:
             recommendation += f". Weak category: {weak_types[0]['key'].replace(':', ' / ')}"
 
+    effective = []
+    for a in attempts:
+        band = a.final_band if a.final_band is not None else a.teacher_band or a.estimated_band
+        if band is not None:
+            effective.append(band)
+
     return {
         "attempts_completed": len(attempts),
         "average_estimated_band": _avg(est),
         "average_teacher_band": _avg(teacher),
+        "average_band": _avg(effective),  # teacher/final preferred per attempt
+        "band_policy": "teacher_final_preferred",
         "task1_average": _avg(t1),
         "task2_average": _avg(t2),
         "criterion_averages": {CRITERION_LABELS[k]: v for k, v in averages.items()},

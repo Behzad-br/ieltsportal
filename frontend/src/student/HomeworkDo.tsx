@@ -60,7 +60,15 @@ export default function HomeworkDo({ assignmentId, mode }: { assignmentId: strin
             }}
           />
         )}
-        {session?.kind === 'listening' && <ListeningRoom attemptId={session.attemptId} onExit={back} />}
+        {session?.kind === 'listening' && (
+          <ListeningRoom
+            attemptId={session.attemptId}
+            onExit={back}
+            onSubmitted={() => {
+              if (session.submission_id) void completeHomework(session.submission_id, { attempt_ref: session.ref });
+            }}
+          />
+        )}
         {session?.kind === 'speaking' && (
           <>
             <SpeakingRoom sessionId={session.sessionId} onExit={back} />

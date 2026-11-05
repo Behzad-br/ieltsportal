@@ -253,7 +253,13 @@ def start_attempt(
     mock_session_id: Optional[str] = None,
     assignment_id: Optional[str] = None,
     timer_mode: str = "countup",
+    commit: bool = True,
 ) -> WritingAttempt:
+    """Create or resume an in-progress writing attempt.
+
+    commit=False: flush only — for homework/mock orchestration that owns the
+    outer transaction (avoids orphan skill rows if the outer commit fails).
+    """
     existing = (
         db.query(WritingAttempt)
         .filter_by(
@@ -280,14 +286,23 @@ def start_attempt(
         timer_mode=timer_mode,
     )
     db.add(attempt)
-    db.commit()
-    db.refresh(attempt)
+    if commit:
+        db.commit()
+        db.refresh(attempt)
+    else:
+        db.flush()
     return attempt
+
+
+# Soft cap — protects DB/AI cost; ~10k words of dense prose is far beyond IELTS practice.
+MAX_ANSWER_CHARS = 50_000
 
 
 def save_draft(db: Session, attempt: WritingAttempt, text: str, time_spent_seconds: Optional[int] = None) -> WritingAttempt:
     if attempt.status != "in_progress":
         raise PermissionError("This attempt can no longer be edited.")
+    if len(text) > MAX_ANSWER_CHARS:
+        raise ValueError(f"Answer exceeds maximum length of {MAX_ANSWER_CHARS} characters.")
     attempt.answer_text = text
     attempt.word_count = count_words(text)
     if time_spent_seconds is not None:
@@ -299,9 +314,12 @@ def save_draft(db: Session, attempt: WritingAttempt, text: str, time_spent_secon
 
 
 def submit_attempt(db: Session, attempt: WritingAttempt, text: Optional[str], time_spent_seconds: Optional[int]) -> WritingAttempt:
-    if attempt.status not in ("in_progress", "grading"):
+    # Only in_progress may freeze new text. Stuck "grading" must not overwrite the essay.
+    if attempt.status != "in_progress":
         raise PermissionError("Attempt already submitted.")
     body = text if text is not None else (attempt.answer_text or "")
+    if len(body) > MAX_ANSWER_CHARS:
+        raise ValueError(f"Answer exceeds maximum length of {MAX_ANSWER_CHARS} characters.")
     attempt.answer_text = body
     attempt.submitted_text = body
     attempt.word_count = count_words(body)
@@ -356,11 +374,12 @@ def pick_random_question(
     return random.choice(pool)
 
 
-def _question_by_any_id(db: Session, ident: Optional[str]) -> Optional[WritingQuestion]:
+def _published_question_by_any_id(db: Session, ident: Optional[str]) -> Optional[WritingQuestion]:
+    """Student mock selection must only resolve published, non-archived questions."""
     if not ident:
         return None
     return (
-        db.query(WritingQuestion)
+        student_visible_questions(db)
         .filter((WritingQuestion.id == ident) | (WritingQuestion.public_id == ident))
         .first()
     )
@@ -374,9 +393,14 @@ def create_mock(
     assignment_id: Optional[str] = None,
     task1_id: Optional[str] = None,
     task2_id: Optional[str] = None,
+    commit: bool = True,
 ) -> WritingMockSession:
-    q1 = _question_by_any_id(db, task1_id)
-    q2 = _question_by_any_id(db, task2_id)
+    q1 = _published_question_by_any_id(db, task1_id)
+    q2 = _published_question_by_any_id(db, task2_id)
+    if task1_id and not q1:
+        raise ValueError("Task 1 question not found or not published.")
+    if task2_id and not q2:
+        raise ValueError("Task 2 question not found or not published.")
     if not q1:
         q1 = pick_random_question(db, student_id, test_type, 1)
     if not q2:
@@ -393,12 +417,19 @@ def create_mock(
     )
     db.add(mock)
     db.flush()
-    a1 = start_attempt(db, student_id, q1, mock_session_id=mock.id, timer_mode="countdown")
-    a2 = start_attempt(db, student_id, q2, mock_session_id=mock.id, timer_mode="countdown")
+    a1 = start_attempt(
+        db, student_id, q1, mock_session_id=mock.id, timer_mode="countdown", commit=False
+    )
+    a2 = start_attempt(
+        db, student_id, q2, mock_session_id=mock.id, timer_mode="countdown", commit=False
+    )
     mock.task1_attempt_id = a1.id
     mock.task2_attempt_id = a2.id
-    db.commit()
-    db.refresh(mock)
+    if commit:
+        db.commit()
+        db.refresh(mock)
+    else:
+        db.flush()
     return mock
 
 

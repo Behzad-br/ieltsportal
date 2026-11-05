@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from difflib import SequenceMatcher
@@ -122,7 +123,8 @@ def non_attempt_grading(*, task_number: int, test_type: str, minimum_words: int,
 
 
 def round_half_band(value: float) -> float:
-    return round(value * 2) / 2.0
+    """Round to nearest 0.5 using half-up (IELTS-style), not banker's rounding."""
+    return math.floor(float(value) * 2 + 0.5) / 2.0
 
 
 def overall_writing_band(task1_band: float, task2_band: float) -> float:
@@ -304,19 +306,64 @@ def _validate_map(data: dict) -> None:
     data.setdefault("relocated", data.get("relocated") or data.get("relocated_items") or [])
 
 
-def resolve_writing_file(path: Optional[str]) -> Optional[Path]:
-    if not path:
-        return None
-    raw = Path(path)
-    root = Path(settings.WRITING_PACKS_DIR).resolve().parent.parent
-    candidates = [raw, root / path, Path(settings.WRITING_PACKS_DIR) / path, Path(settings.WRITING_IMAGE_DIR) / Path(path).name]
-    for candidate in candidates:
+def _writing_media_roots() -> list[Path]:
+    """Allowed roots for student-facing writing images (no arbitrary filesystem paths)."""
+    roots: list[Path] = []
+    for raw in (settings.WRITING_IMAGE_DIR, settings.WRITING_PACKS_DIR, settings.WRITING_BANK_PATH):
+        if not raw:
+            continue
         try:
-            resolved = candidate.resolve() if not candidate.is_absolute() else candidate
+            p = Path(raw).resolve()
         except OSError:
             continue
-        if resolved.is_file():
-            return resolved
+        roots.append(p if p.is_dir() else p.parent)
+    # data/ root that typically contains writing-packs + writing_images
+    try:
+        packs = Path(settings.WRITING_PACKS_DIR).resolve()
+        data_root = packs.parent
+        if data_root not in roots:
+            roots.append(data_root)
+    except OSError:
+        pass
+    return roots
+
+
+def resolve_writing_file(path: Optional[str]) -> Optional[Path]:
+    """Resolve a writing image path only if it stays under known media roots."""
+    if not path:
+        return None
+    # Reject obvious traversal tokens in the stored path string.
+    normalized = str(path).replace("\\", "/")
+    if ".." in Path(normalized).parts:
+        return None
+    name = Path(normalized).name
+    roots = _writing_media_roots()
+    candidates = [
+        Path(settings.WRITING_IMAGE_DIR) / name,
+        Path(settings.WRITING_PACKS_DIR) / normalized,
+        Path(settings.WRITING_PACKS_DIR) / name,
+    ]
+    # Relative paths under data/ (common import shape: data/writing-packs/...)
+    if not Path(normalized).is_absolute():
+        try:
+            data_root = Path(settings.WRITING_PACKS_DIR).resolve().parent
+            candidates.append(data_root / normalized)
+            candidates.append(Path(normalized))
+        except OSError:
+            pass
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        for root in roots:
+            try:
+                resolved.relative_to(root)
+                return resolved
+            except ValueError:
+                continue
     return None
 
 
@@ -415,10 +462,17 @@ def validate_grading_payload(data: dict, task_number: int) -> dict:
         block["feedback"] = str(block.get("feedback") or "")
         criteria[key] = block
 
-    overall = coerce_band(data.get("estimated_overall_band"))
-    if overall is None:
-        scores = [criteria[k]["band"] for k in required_keys]
-        overall = round_half_band(sum(scores) / 4.0)
+    # Overall band is derived from criterion scores — do not trust model-supplied overall alone.
+    scores = [criteria[k]["band"] for k in required_keys]
+    overall = round_half_band(sum(scores) / 4.0)
+    # If the model also sent a band, keep only when it matches the criterion average
+    # (allows half-band rounding differences of 0); otherwise criterion average wins.
+    try:
+        model_overall = coerce_band(data.get("estimated_overall_band"))
+    except ValueError:
+        model_overall = None
+    if model_overall is not None and model_overall == overall:
+        overall = model_overall
 
     grammar_errors = data.get("grammar_errors") or []
     cleaned_errors = []

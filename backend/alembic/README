@@ -1,0 +1,9 @@
+Alembic migrations for this backend.
+
+See `backend/docs/MIGRATIONS.md` for baseline stamp strategy, developer workflow,
+and staging/production deployment steps.
+
+Quick start (from `backend/`):
+
+    alembic current
+    alembic upgrade head

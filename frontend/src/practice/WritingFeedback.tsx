@@ -75,19 +75,27 @@ export default function WritingFeedback({
   const why = whyLines(grading, attempt);
   const suggestions = suggestionLines(grading);
   const strengths = asLines(grading?.strengths);
-  const score = band ?? attempt.final_band ?? attempt.estimated_band;
+  const source = attempt.band_source || (attempt.teacher_band != null ? "teacher" : attempt.estimated_band != null ? "ai_estimated" : "none");
+  const score = band ?? attempt.final_band ?? attempt.estimated_band ?? null;
   const nonAttempt = Boolean(grading?.non_attempt);
+  const resolvedHeading =
+    source === "teacher" ? "Teacher final band" : source === "ai_estimated" ? "Estimated practice band" : heading;
 
   return (
     <div className="space-y-5">
       <div className="card p-6">
-        <div className="eyebrow">{nonAttempt ? "No assessable attempt" : heading}</div>
+        <div className="eyebrow">{nonAttempt ? "No assessable attempt" : resolvedHeading}</div>
         <h2 className="mt-2 font-display text-2xl font-bold">{title}</h2>
         <div className="metric-number mt-4 text-5xl font-bold">{score ?? "—"}</div>
+        {attempt.teacher_band != null && attempt.estimated_band != null && attempt.teacher_band !== attempt.estimated_band && (
+          <p className="mt-2 text-sm text-muted-foreground">AI estimate: {attempt.estimated_band}</p>
+        )}
         <p className="mt-3 text-xs text-muted-foreground">
           {nonAttempt
             ? "Random letters, empty scripts, and keyboard smash get band 0. Write a real English answer to receive a practice band."
-            : "This is practice feedback, not an official IELTS score."}
+            : source === "teacher"
+              ? "Teacher score is final for this practice attempt. The AI estimate is kept for comparison when available."
+              : "This is practice feedback, not an official IELTS score."}
         </p>
         <div className="mt-4 flex flex-wrap gap-2 text-sm">
           {attempt.time_spent_seconds != null && attempt.time_spent_seconds > 0 && (

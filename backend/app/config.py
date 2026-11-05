@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # ── Runtime ───────────────────────────────────────────────────────────────
     NODE_ENV: str = "development"
     ENV: str = ""
+    # Explicit environment label (development|test|staging|production). Falls back to ENV/NODE_ENV.
+    ENVIRONMENT: str = ""
+    # When false, startup skips create_all + additive ALTER (Alembic owns schema).
+    # Default empty → derived from ENVIRONMENT (staging/production → false).
+    AUTO_CREATE_SCHEMA: str = ""
+    # When true on staging/production, refuse to start if Alembic current != head.
+    REQUIRE_MIGRATIONS_AT_HEAD: str = ""
     PORT: int = 5000
     APP_NAME: str = "IELTS Practice"
 
@@ -112,6 +119,7 @@ class Settings(BaseSettings):
     NOTES_DIR: str = ""
     MOCK_IMAGE_DIR: str = ""
     HOMEWORK_AUDIO_DIR: str = ""
+    SPEAKING_AUDIO_DIR: str = ""
     TEMP_DIR: str = ""
 
     # ── Writing AI (backend-only; never sent to the browser) ──────────────────
@@ -120,6 +128,8 @@ class Settings(BaseSettings):
     WRITING_AI_GRADING_ENABLED: bool = True
     WRITING_DUPLICATE_THRESHOLD: float = 0.94
     WRITING_ADMIN_TOKEN: str = ""
+    # Production: shared ops token disabled unless ALLOW_WRITING_ADMIN_TOKEN=true.
+    ALLOW_WRITING_ADMIN_TOKEN: bool = False
     DEFAULT_STUDENT_ID: str = "local"
 
     ENABLE_LIVE_MOCK_MONITORING: bool = True
@@ -168,9 +178,54 @@ class Settings(BaseSettings):
         return _BACKEND_DIR
 
     @property
+    def environment_name(self) -> str:
+        raw = (self.ENVIRONMENT or self.ENV or self.NODE_ENV or "development").strip().lower()
+        if raw in {"prod"}:
+            return "production"
+        if raw in {"dev"}:
+            return "development"
+        return raw or "development"
+
+    @property
     def is_production(self) -> bool:
-        env = (self.ENV or self.NODE_ENV or "").strip().lower()
-        return env in {"production", "prod"}
+        return self.environment_name in {"production", "prod"}
+
+    @property
+    def writing_admin_token_allowed(self) -> bool:
+        """Shared X-Admin-Token fallback. Off in production unless explicitly enabled."""
+        if not (self.WRITING_ADMIN_TOKEN or "").strip():
+            return False
+        if self.is_production and not self.ALLOW_WRITING_ADMIN_TOKEN:
+            return False
+        return True
+
+    @property
+    def is_staging(self) -> bool:
+        return self.environment_name == "staging"
+
+    @property
+    def is_managed_schema_env(self) -> bool:
+        """Staging/production: Alembic owns schema; no silent create_all/ALTER."""
+        return self.environment_name in {"staging", "production", "prod"}
+
+    @property
+    def auto_create_schema(self) -> bool:
+        raw = (self.AUTO_CREATE_SCHEMA or "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        # Default: allow bootstrap only outside staging/production.
+        return not self.is_managed_schema_env
+
+    @property
+    def require_migrations_at_head(self) -> bool:
+        raw = (self.REQUIRE_MIGRATIONS_AT_HEAD or "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return self.is_managed_schema_env
 
     def resolved_database_url(self) -> str:
         """Full SQLAlchemy URL: explicit DATABASE_URL, else MySQL from DB_*, else SQLite."""
@@ -261,6 +316,8 @@ class Settings(BaseSettings):
             self.MOCK_IMAGE_DIR = p("mock_images")
         if not self.HOMEWORK_AUDIO_DIR:
             self.HOMEWORK_AUDIO_DIR = p("homework_audio")
+        if not self.SPEAKING_AUDIO_DIR:
+            self.SPEAKING_AUDIO_DIR = p("speaking_audio")
         if not self.TEMP_DIR:
             self.TEMP_DIR = p("tmp")
 

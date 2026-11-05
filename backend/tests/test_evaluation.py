@@ -36,16 +36,18 @@ def test_normalize_evaluation_basic():
     assert isinstance(result["corrections"], list)
 
 
-def test_normalize_evaluation_clamps_out_of_range():
+def test_normalize_evaluation_rejects_out_of_range():
     raw = {
-        "fluency_coherence": 15.0,  # Out of range
-        "lexical_resource": -1.0,   # Out of range
+        "fluency_coherence": 15.0,  # Out of range → ignored
+        "lexical_resource": -1.0,   # Out of range → ignored
         "grammar": 8.0,
         "estimated_band": 20.0,
     }
     result = _normalize_evaluation(raw)
-    assert result["fluency_coherence"] == 9.0  # Clamped to max
-    assert result["lexical_resource"] == 0.0   # Clamped to min
+    assert result["fluency_coherence"] is None
+    assert result["lexical_resource"] is None
+    assert result["grammar"] == 8.0
+    assert result["estimated_band"] == 8.0  # from valid criteria only
 
 
 def test_normalize_handles_missing_fields():

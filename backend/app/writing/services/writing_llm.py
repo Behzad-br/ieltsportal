@@ -70,7 +70,7 @@ async def writing_chat_json(
         data = await minimax_client.chat_json(
             system_prompt,
             user_prompt,
-            retries=2,
+            retries=None,  # uses settings.LLM_MAX_RETRIES
             model=used_model,
             max_tokens=max_tokens,
         )
