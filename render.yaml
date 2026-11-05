@@ -13,7 +13,7 @@ services:
     runtime: python
     plan: free
     rootDir: backend
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-core.txt
     startCommand: uvicorn app.main:asgi_app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     envVars:
