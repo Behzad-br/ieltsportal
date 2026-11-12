@@ -17,7 +17,7 @@ export function getStudentId(): string {
 /** Ops-only WRITING_ADMIN_TOKEN fallback. Prefer JWT for teachers. Never put LLM API keys here. */
 export function getAdminToken(): string {
   if (typeof window === "undefined") return "";
-  return localStorage.getItem("writing_admin_token") || "";
+  return sessionStorage.getItem("writing_admin_token") || localStorage.getItem("writing_admin_token") || "";
 }
 
 async function request<T>(path: string, options?: RequestInit & { admin?: boolean }): Promise<T> {

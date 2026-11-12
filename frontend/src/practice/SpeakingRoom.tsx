@@ -239,7 +239,7 @@ export default function SpeakingRoom({ sessionId, onExit }: { sessionId: string;
 
   if (result) {
     return (
-      <div className="min-h-dvh overflow-y-auto bg-[#f4f1eb] p-5 md:p-8">
+      <div className="h-full overflow-y-auto bg-[#f4f1eb] p-5 pb-20 md:p-8 md:pb-24">
         {onExit && (
           <button type="button" onClick={onExit} className="mb-4 flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
             <ArrowLeft size={16} /> Back to tests
@@ -259,7 +259,7 @@ export default function SpeakingRoom({ sessionId, onExit }: { sessionId: string;
 
   if (!voiceUnlocked && q) {
     return (
-      <div className="flex h-dvh flex-col items-center justify-center gap-5 bg-[#eef1f6] p-6 text-center">
+      <div className="flex h-full flex-col items-center justify-center gap-5 bg-[#eef1f6] p-6 text-center">
         <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-600">Speaking practice</p>
         <h2 className="max-w-md font-display text-2xl font-bold">{state.title}</h2>
         <p className="max-w-sm text-sm text-muted-foreground">
@@ -282,7 +282,7 @@ export default function SpeakingRoom({ sessionId, onExit }: { sessionId: string;
   }
 
   return (
-    <div className="flex h-dvh flex-col bg-[#eef1f6]">
+    <div className="flex h-full flex-col bg-[#eef1f6]">
       <header className="z-20 shrink-0 border-b border-black/10 bg-[#1b2430] px-4 py-2.5 text-white md:px-6">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">

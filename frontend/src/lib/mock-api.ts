@@ -92,8 +92,8 @@ export function getPublishedReview() { return localStorage.getItem('ielts-publis
 export function setPublishedReview(value: boolean) { localStorage.setItem('ielts-published-review', String(value)); }
 export function getDraft() { return localStorage.getItem('ielts-writing-draft') || ''; }
 export function saveDraft(value: string) { localStorage.setItem('ielts-writing-draft', value); }
-export function getRole(): Role { return (localStorage.getItem('ielts-role') as Role) || 'student'; }
-export function setRole(role: Role) { localStorage.setItem('ielts-role', role); }
+export function getRole(): Role { return (sessionStorage.getItem('ielts-role') as Role) || 'student'; }
+export function setRole(role: Role) { sessionStorage.setItem('ielts-role', role); }
 
 const mockStore = <T,>(key: string, fallback: T): T => {
   try { return JSON.parse(localStorage.getItem(key) || '') as T; } catch { return fallback; }
@@ -346,12 +346,12 @@ export function subscribeTeacherSession(listener: () => void) {
 }
 
 export function setCurrentTeacher(id: string) {
-  localStorage.setItem(TEACHER_SESSION_KEY, id);
+  sessionStorage.setItem(TEACHER_SESSION_KEY, id);
   notifyTeacherSession();
 }
 
 export function getCurrentTeacher(): Record<string, string> {
-  const id = typeof window === 'undefined' ? '' : (localStorage.getItem(TEACHER_SESSION_KEY) || '');
+  const id = typeof window === 'undefined' ? '' : (sessionStorage.getItem(TEACHER_SESSION_KEY) || '');
   const accounts = listTeacherAccounts();
   return (
     accounts.find((t) => t.id === id) ||
@@ -712,14 +712,14 @@ export function setCurrentStudent(row: Partial<CurrentStudent> & { id: string })
     username: row.username || '',
     track: row.track || '',
   };
-  localStorage.setItem('ielts-current-student', JSON.stringify(next));
-  if (id) localStorage.setItem('writing_student_id', id);
-  else localStorage.removeItem('writing_student_id');
+  sessionStorage.setItem('ielts-current-student', JSON.stringify(next));
+  if (id) sessionStorage.setItem('writing_student_id', id);
+  else sessionStorage.removeItem('writing_student_id');
 }
 
 export function getCurrentStudent(): CurrentStudent {
   try {
-    const row = JSON.parse(localStorage.getItem('ielts-current-student') || '') as CurrentStudent;
+    const row = JSON.parse(sessionStorage.getItem('ielts-current-student') || '') as CurrentStudent;
     if (row?.id) return row;
   } catch {
     /* ignore */
@@ -1255,19 +1255,19 @@ export function matchBranchAdminLogin(username: string, password: string): Branc
 }
 
 export function setCurrentBranchAdmin(id: string, username?: string) {
-  localStorage.setItem(BRANCH_ADMIN_SESSION, id);
-  if (username) localStorage.setItem(BRANCH_ADMIN_USER, username);
+  sessionStorage.setItem(BRANCH_ADMIN_SESSION, id);
+  if (username) sessionStorage.setItem(BRANCH_ADMIN_USER, username);
 }
 
 export function getCurrentBranchAdmin(): CampusBranch | null {
-  const id = localStorage.getItem(BRANCH_ADMIN_SESSION);
+  const id = sessionStorage.getItem(BRANCH_ADMIN_SESSION);
   return id ? getBranch(id) || null : null;
 }
 
 export function getCurrentBranchAdminUser(): BranchAdminAccount | null {
   const campus = getCurrentBranchAdmin();
   if (!campus) return null;
-  const username = (localStorage.getItem(BRANCH_ADMIN_USER) || campus.adminUsername || '').toLowerCase();
+  const username = (sessionStorage.getItem(BRANCH_ADMIN_USER) || campus.adminUsername || '').toLowerCase();
   return asAdmins(campus).find((a) => a.username.toLowerCase() === username) || asAdmins(campus)[0] || null;
 }
 

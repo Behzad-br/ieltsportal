@@ -24,16 +24,18 @@ const DEMO_HQ = 'demo-gujranwala';
 export function purgeDemoSessionIfDisabled() {
   if (DEMO_MODE || typeof window === 'undefined') return;
   try {
-    const token = localStorage.getItem('ielts-access-token') || '';
-    if (token === DEMO_TOKEN) {
-      localStorage.removeItem('ielts-access-token');
-      localStorage.removeItem('ielts-auth-user');
-      localStorage.removeItem('ielts-role');
-      localStorage.removeItem('ielts-current-teacher-id');
-      localStorage.removeItem('ielts-current-student');
-      localStorage.removeItem('writing_student_id');
-      localStorage.removeItem('ielts-branch-admin-id');
-      localStorage.removeItem('ielts-branch-admin-username');
+    for (const store of [sessionStorage, localStorage]) {
+      const token = store.getItem('ielts-access-token') || '';
+      if (token === DEMO_TOKEN) {
+        store.removeItem('ielts-access-token');
+        store.removeItem('ielts-auth-user');
+        store.removeItem('ielts-role');
+        store.removeItem('ielts-current-teacher-id');
+        store.removeItem('ielts-current-student');
+        store.removeItem('writing_student_id');
+        store.removeItem('ielts-branch-admin-id');
+        store.removeItem('ielts-branch-admin-username');
+      }
     }
   } catch {
     /* ignore */
@@ -82,8 +84,8 @@ export function ensureDemoSession(role: 'super_admin' | 'branch_admin' | 'teache
     batches: extra?.batches || `${DEMO_BATCH_A}, ${DEMO_BATCH_EVE}`,
     is_active: true,
   };
-  localStorage.setItem('ielts-access-token', DEMO_TOKEN);
-  localStorage.setItem('ielts-auth-user', JSON.stringify(user));
+  sessionStorage.setItem('ielts-access-token', DEMO_TOKEN);
+  sessionStorage.setItem('ielts-auth-user', JSON.stringify(user));
   return user;
 }
 
@@ -229,7 +231,7 @@ export function enterDemoRole(role: 'admin' | 'branch-admin' | 'teacher' | 'stud
   seedDemoWorld();
   if (role === 'admin') {
     ensureDemoSession('super_admin', { username: 'super.admin', full_name: 'Demo Super Admin', email: 'super.admin@demo.fti.local' });
-    localStorage.setItem('ielts-role', 'admin');
+    sessionStorage.setItem('ielts-role', 'admin');
     return '/admin/dashboard';
   }
   if (role === 'branch-admin') {
@@ -239,9 +241,9 @@ export function enterDemoRole(role: 'admin' | 'branch-admin' | 'teacher' | 'stud
       email: 'nadia.admin@demo.fti.local',
       branch_id: 'demo-gujranwala',
     });
-    localStorage.setItem('ielts-branch-admin-id', 'demo-gujranwala');
-    localStorage.setItem('ielts-branch-admin-username', 'nadia.admin');
-    localStorage.setItem('ielts-role', 'branch-admin');
+    sessionStorage.setItem('ielts-branch-admin-id', 'demo-gujranwala');
+    sessionStorage.setItem('ielts-branch-admin-username', 'nadia.admin');
+    sessionStorage.setItem('ielts-role', 'branch-admin');
     return '/branch-admin/dashboard';
   }
   if (role === 'teacher') {
@@ -257,8 +259,8 @@ export function enterDemoRole(role: 'admin' | 'branch-admin' | 'teacher' | 'stud
       branch_id: t?.branchId || DEMO_HQ,
       batches: t?.batches || DEMO_BATCH_A,
     });
-    if (t?.id) localStorage.setItem('ielts-current-teacher-id', t.id);
-    localStorage.setItem('ielts-role', 'teacher');
+    if (t?.id) sessionStorage.setItem('ielts-current-teacher-id', t.id);
+    sessionStorage.setItem('ielts-role', 'teacher');
     return '/teacher/dashboard';
   }
   const students = JSON.parse(localStorage.getItem('ielts-entities-student') || '[]') as {
@@ -278,7 +280,7 @@ export function enterDemoRole(role: 'admin' | 'branch-admin' | 'teacher' | 'stud
     batch: s?.batch || DEMO_BATCH_A,
   });
   if (s) {
-    localStorage.setItem(
+    sessionStorage.setItem(
       'ielts-current-student',
       JSON.stringify({
         id: s.id,
@@ -288,8 +290,8 @@ export function enterDemoRole(role: 'admin' | 'branch-admin' | 'teacher' | 'stud
         username: s.username,
       }),
     );
-    localStorage.setItem('writing_student_id', s.id);
+    sessionStorage.setItem('writing_student_id', s.id);
   }
-  localStorage.setItem('ielts-role', 'student');
+  sessionStorage.setItem('ielts-role', 'student');
   return '/student/dashboard';
 }

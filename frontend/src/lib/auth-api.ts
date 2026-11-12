@@ -31,7 +31,7 @@ const USER_KEY = 'ielts-auth-user';
 
 export function getAccessToken(): string {
   try {
-    return localStorage.getItem(TOKEN_KEY) || '';
+    return sessionStorage.getItem(TOKEN_KEY) || '';
   } catch {
     return '';
   }
@@ -39,7 +39,7 @@ export function getAccessToken(): string {
 
 export function getAuthUser(): AuthUser | null {
   try {
-    const raw = localStorage.getItem(USER_KEY);
+    const raw = sessionStorage.getItem(USER_KEY);
     if (!raw) return null;
     return JSON.parse(raw) as AuthUser;
   } catch {
@@ -51,13 +51,13 @@ export function setAuthSession(token: string, user: AuthUser) {
   if (!token || !user || typeof user !== 'object') {
     throw new Error('Cannot save session: missing access token or user.');
   }
-  localStorage.setItem(TOKEN_KEY, token);
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  sessionStorage.setItem(TOKEN_KEY, token);
+  sessionStorage.setItem(USER_KEY, JSON.stringify(user));
 }
 
 export function clearAuthSession() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(USER_KEY);
 }
 
 export function authHeaders(): Record<string, string> {
@@ -129,7 +129,7 @@ export async function apiMe() {
     clearAuthSession();
     throw new AuthSessionError('Invalid authentication response.', 'invalid');
   }
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  sessionStorage.setItem(USER_KEY, JSON.stringify(user));
   return user;
 }
 

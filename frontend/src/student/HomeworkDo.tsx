@@ -46,37 +46,39 @@ export default function HomeworkDo({ assignmentId, mode }: { assignmentId: strin
   if (mode === 'do' || session) {
     const back = () => setLocation(`/student/homework/${assignmentId}`);
     return (
-      <div className="h-dvh overflow-hidden bg-white">
-        {error && <p className="bg-red-50 px-4 py-2 text-sm text-red-700">{error}</p>}
-        {!session && <div className="p-8"><Button onClick={begin}>Continue</Button></div>}
-        {session?.kind === 'writing-question' && <WritingRoom questionId={session.questionId} onDone={finish} />}
-        {session?.kind === 'writing-mock' && <WritingRoom mockId={session.mockId} onDone={finish} />}
-        {session?.kind === 'reading' && (
-          <ReadingRoom
-            attemptId={session.attemptId}
-            onExit={back}
-            onSubmitted={() => {
-              if (session.submission_id) void completeHomework(session.submission_id, { attempt_ref: session.ref });
-            }}
-          />
-        )}
-        {session?.kind === 'listening' && (
-          <ListeningRoom
-            attemptId={session.attemptId}
-            onExit={back}
-            onSubmitted={() => {
-              if (session.submission_id) void completeHomework(session.submission_id, { attempt_ref: session.ref });
-            }}
-          />
-        )}
-        {session?.kind === 'speaking' && (
-          <>
-            <SpeakingRoom sessionId={session.sessionId} onExit={back} />
-            <div className="fixed bottom-4 right-4 z-50">
-              <Button onClick={finish}>Mark submitted for teacher review</Button>
-            </div>
-          </>
-        )}
+      <div className="flex h-dvh flex-col overflow-hidden bg-white">
+        {error && <p className="shrink-0 bg-red-50 px-4 py-2 text-sm text-red-700">{error}</p>}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {!session && <div className="p-8"><Button onClick={begin}>Continue</Button></div>}
+          {session?.kind === 'writing-question' && <WritingRoom questionId={session.questionId} onDone={finish} />}
+          {session?.kind === 'writing-mock' && <WritingRoom mockId={session.mockId} onDone={finish} />}
+          {session?.kind === 'reading' && (
+            <ReadingRoom
+              attemptId={session.attemptId}
+              onExit={back}
+              onSubmitted={() => {
+                if (session.submission_id) void completeHomework(session.submission_id, { attempt_ref: session.ref });
+              }}
+            />
+          )}
+          {session?.kind === 'listening' && (
+            <ListeningRoom
+              attemptId={session.attemptId}
+              onExit={back}
+              onSubmitted={() => {
+                if (session.submission_id) void completeHomework(session.submission_id, { attempt_ref: session.ref });
+              }}
+            />
+          )}
+          {session?.kind === 'speaking' && (
+            <>
+              <SpeakingRoom sessionId={session.sessionId} onExit={back} />
+              <div className="fixed bottom-4 right-4 z-50">
+                <Button onClick={finish}>Mark submitted for teacher review</Button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     );
   }

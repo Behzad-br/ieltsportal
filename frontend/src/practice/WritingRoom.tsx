@@ -48,7 +48,7 @@ function Editor({
   }, [text, attempt.id, seconds]);
 
   return (
-    <div className="flex h-dvh flex-col bg-[#eef1f6]">
+    <div className="flex h-full flex-col bg-[#eef1f6]">
       <header className="z-20 shrink-0 border-b border-black/10 bg-[#1b2430] px-4 py-2.5 text-white md:px-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
@@ -184,7 +184,7 @@ export default function WritingRoom({ questionId, mockId, onDone }: { questionId
   if (error) return <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</div>;
   if (attempt?.status && attempt.status !== "in_progress" && !mockId) {
     return (
-      <div className="min-h-dvh overflow-y-auto bg-[#f4f1eb] p-5 md:p-8">
+      <div className="h-full overflow-y-auto bg-[#f4f1eb] p-5 md:p-8">
         <div className="mx-auto max-w-4xl space-y-4">
         {onDone && (
           <button type="button" onClick={onDone} className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
@@ -203,7 +203,7 @@ export default function WritingRoom({ questionId, mockId, onDone }: { questionId
   }
   if (mock && mock.status !== "in_progress") {
     return (
-      <div className="min-h-dvh overflow-y-auto bg-[#f4f1eb] p-5 md:p-8">
+      <div className="h-full overflow-y-auto bg-[#f4f1eb] p-5 md:p-8">
       <div className="mx-auto max-w-4xl space-y-5">
         {onDone && (
           <button type="button" onClick={onDone} className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">

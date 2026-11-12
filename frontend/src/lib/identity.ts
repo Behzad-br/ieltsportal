@@ -33,7 +33,7 @@ export function getCanonicalStudentId(): string {
   }
   // Staff impersonation / practice-as: only accept UUID-like or non-blocked cached mirror.
   try {
-    const raw = localStorage.getItem('ielts-current-student');
+    const raw = sessionStorage.getItem('ielts-current-student');
     if (raw) {
       const row = JSON.parse(raw) as { id?: string };
       if (row?.id && !isBlockedLegacyId(row.id)) return row.id;
@@ -41,7 +41,7 @@ export function getCanonicalStudentId(): string {
   } catch {
     /* ignore */
   }
-  const fallback = localStorage.getItem('writing_student_id') || '';
+  const fallback = sessionStorage.getItem('writing_student_id') || '';
   if (fallback && !isBlockedLegacyId(fallback)) return fallback;
   return '';
 }
@@ -50,11 +50,11 @@ export function getCanonicalTeacherId(): string {
   const user = getSessionUser();
   if (user?.role === 'teacher' && user.id) return user.id;
   if (user && (user.role === 'super_admin' || user.role === 'branch_admin') && user.id) {
-    const header = localStorage.getItem('ielts-current-teacher-id') || '';
+    const header = sessionStorage.getItem('ielts-current-teacher-id') || '';
     if (header && !isBlockedLegacyId(header)) return header;
     return user.id;
   }
-  const raw = localStorage.getItem('ielts-current-teacher-id') || '';
+  const raw = sessionStorage.getItem('ielts-current-teacher-id') || '';
   return isBlockedLegacyId(raw) ? '' : raw;
 }
 
@@ -84,12 +84,12 @@ export function pathAllowedForUser(pathname: string, user: AuthUser | null): boo
 export function forceLogout() {
   clearAuthSession();
   try {
-    localStorage.removeItem('ielts-role');
-    localStorage.removeItem('ielts-current-student');
-    localStorage.removeItem('ielts-current-teacher-id');
-    localStorage.removeItem('writing_student_id');
-    localStorage.removeItem('ielts-branch-admin-id');
-    localStorage.removeItem('ielts-branch-admin-username');
+    sessionStorage.removeItem('ielts-role');
+    sessionStorage.removeItem('ielts-current-student');
+    sessionStorage.removeItem('ielts-current-teacher-id');
+    sessionStorage.removeItem('writing_student_id');
+    sessionStorage.removeItem('ielts-branch-admin-id');
+    sessionStorage.removeItem('ielts-branch-admin-username');
   } catch {
     /* ignore */
   }

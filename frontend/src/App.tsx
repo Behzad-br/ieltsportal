@@ -496,7 +496,8 @@ function Login() {
         email: user.email,
         username: user.username,
       });
-      localStorage.setItem('writing_student_id', user.id);
+      localStorage.removeItem('writing_student_id');
+      sessionStorage.setItem('writing_student_id', user.id);
       setRole('student');
       setLocation('/student/dashboard');
     } catch (err) {
@@ -1056,7 +1057,8 @@ function AppRouter(){
             email: user.email,
             username: user.username,
           });
-          localStorage.setItem('writing_student_id', user.id);
+          localStorage.removeItem('writing_student_id');
+          sessionStorage.setItem('writing_student_id', user.id);
         }
         await hydrateOrgFromBackend(user);
       } catch (err) {

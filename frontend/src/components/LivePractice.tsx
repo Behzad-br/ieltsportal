@@ -49,7 +49,7 @@ export default function LivePractice({
   const exam = listening || reading || writing || speaking;
 
   return (
-    <div className={exam ? 'h-dvh overflow-hidden' : 'space-y-4'}>
+    <div className={exam ? 'flex h-dvh flex-col overflow-hidden' : 'space-y-4'}>
       {!exam && (
         <button
           onClick={onExit}
@@ -59,23 +59,25 @@ export default function LivePractice({
           Back to practice setup
         </button>
       )}
-      {error && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</div>}
-      {!error && !session && (
-        <div className={`flex min-h-[40vh] flex-col items-center justify-center gap-2 ${exam ? 'h-full text-slate-500' : 'text-muted-foreground'}`}>
-          <p className="font-display text-lg font-bold text-foreground">
-            {source === 'ai' ? 'AI is generating your practice…' : `Starting ${module} practice…`}
-          </p>
-          {listening && <p className="text-sm">Opening the recording and answer paper.</p>}
-          {reading && <p className="text-sm">Opening the passage and questions.</p>}
-          {writing && <p className="text-sm">Opening the writing paper.</p>}
-          {speaking && <p className="text-sm">Opening the speaking room.</p>}
-        </div>
-      )}
-      {session?.kind === 'writing-question' && <WritingRoom questionId={session.questionId} onDone={onExit} />}
-      {session?.kind === 'writing-mock' && <WritingRoom mockId={session.mockId} onDone={onExit} />}
-      {session?.kind === 'reading' && <ReadingRoom attemptId={session.attemptId} onExit={onExit} />}
-      {session?.kind === 'listening' && <ListeningRoom attemptId={session.attemptId} onExit={onExit} />}
-      {session?.kind === 'speaking' && <SpeakingRoom sessionId={session.sessionId} onExit={onExit} />}
+      {error && <div className="shrink-0 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</div>}
+      <div className={exam ? 'min-h-0 flex-1 overflow-y-auto' : ''}>
+        {!error && !session && (
+          <div className={`flex min-h-[40vh] flex-col items-center justify-center gap-2 ${exam ? 'h-full text-slate-500' : 'text-muted-foreground'}`}>
+            <p className="font-display text-lg font-bold text-foreground">
+              {source === 'ai' ? 'AI is generating your practice…' : `Starting ${module} practice…`}
+            </p>
+            {listening && <p className="text-sm">Opening the recording and answer paper.</p>}
+            {reading && <p className="text-sm">Opening the passage and questions.</p>}
+            {writing && <p className="text-sm">Opening the writing paper.</p>}
+            {speaking && <p className="text-sm">Opening the speaking room.</p>}
+          </div>
+        )}
+        {session?.kind === 'writing-question' && <WritingRoom questionId={session.questionId} onDone={onExit} />}
+        {session?.kind === 'writing-mock' && <WritingRoom mockId={session.mockId} onDone={onExit} />}
+        {session?.kind === 'reading' && <ReadingRoom attemptId={session.attemptId} onExit={onExit} />}
+        {session?.kind === 'listening' && <ListeningRoom attemptId={session.attemptId} onExit={onExit} />}
+        {session?.kind === 'speaking' && <SpeakingRoom sessionId={session.sessionId} onExit={onExit} />}
+      </div>
     </div>
   );
 }

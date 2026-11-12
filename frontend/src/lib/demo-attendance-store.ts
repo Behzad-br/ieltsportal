@@ -82,7 +82,7 @@ export function ensureDemoAttendance() {
     ];
   }
 
-  const teacherId = localStorage.getItem('ielts-current-teacher-id') || 'demo-teacher-1';
+  const teacherId = sessionStorage.getItem('ielts-current-teacher-id') || 'demo-teacher-1';
   const branchId = roster[0]?.branchId || 'demo-gujranwala';
   const statuses: AttendanceStatus[] = ['present', 'present', 'late', 'absent', 'present', 'excused', 'present', 'present'];
 

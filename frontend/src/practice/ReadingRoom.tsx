@@ -319,7 +319,7 @@ function ResultView({
   };
 
   return (
-    <div className="h-dvh overflow-y-auto bg-[#f4f1eb]">
+    <div className="h-full overflow-y-auto bg-[#f4f1eb]">
       <div className="mx-auto flex max-w-4xl flex-col gap-5 p-5 md:p-8">
         {onExit && (
           <button type="button" onClick={onExit} className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
@@ -549,7 +549,7 @@ export default function ReadingRoom({ attemptId, onExit, onSubmitted }: { attemp
   }
 
   return (
-    <div ref={screenRef} className="flex h-dvh flex-col bg-white text-slate-900">
+    <div ref={screenRef} className="flex h-full flex-col bg-white text-slate-900">
       <ExamTopBar
         remaining={clock}
         lowTime={lowTime}
